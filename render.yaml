@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: sentiment-analyser
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 180 app:app
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: SERPAPI_KEY
+        sync: false
+      - key: HF_HOME
+        value: /opt/render/.cache/huggingface

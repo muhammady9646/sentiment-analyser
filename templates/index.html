@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sentiment Analyser</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-inner">
+        <div class="header-spacer"></div>
+        <a class="header-title" href="{{ url_for('home') }}">Sentiment Analyser</a>
+        <div class="header-spacer"></div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card hero-card{% if show_analysis_panel %} is-hidden{% endif %}" id="page-one">
+        <h1>Brand Sentiment Workspace</h1>
+        <p class="subtext">
+          Add one or more brands, preview matched stores, then run a structured multi-brand
+          sentiment analysis.
+        </p>
+
+        <form method="post" action="{{ url_for('preview') }}" class="search-form" id="preview-form">
+          <label for="geography">Geography</label>
+          <select id="geography" name="geography">
+            {% for option in geography_choices %}
+            <option value="{{ option.value }}" {% if option.value == selected_geography %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+            {% endfor %}
+          </select>
+
+          <div class="brand-grid-header">
+            <span>Brand Name</span>
+            <span></span>
+          </div>
+
+          <div id="brand-rows" class="brand-rows">
+            {% for row in brand_inputs %}
+            <div class="brand-row">
+              <input
+                type="text"
+                name="brand_name[]"
+                value="{{ row.name }}"
+                placeholder="e.g. Starbucks"
+                required
+              />
+              <button type="button" class="ghost-btn remove-brand-btn">Remove</button>
+            </div>
+            {% endfor %}
+          </div>
+
+          <div class="actions-row">
+            <button type="button" id="add-brand-btn" class="ghost-btn">Add Brand</button>
+            <button type="submit">Preview Places</button>
+          </div>
+        </form>
+
+        {% if info %}
+        <div class="info">{{ info }}</div>
+        {% endif %}
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+      </section>
+
+      {% if preview_rows %}
+      <section class="card{% if show_analysis_panel %} is-hidden{% endif %}" id="confirm-section">
+        <h2>Confirm Brands</h2>
+        <p class="subtext">Review store examples and descriptions for each brand before analysis.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Brand</th>
+                <th>Store Name Examples</th>
+                <th>Google Business Description</th>
+                <th>Geography</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in preview_rows %}
+              <tr>
+                <td><strong>{{ row.brand_name }}</strong></td>
+                <td>
+                  <div class="chip-list">
+                    {% for name in row.store_examples %}
+                    <span class="chip">{{ name }}</span>
+                    {% endfor %}
+                  </div>
+                </td>
+                <td>{{ row.business_description }}</td>
+                <td>{{ row.geography_label }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="actions-row">
+          <button type="button" id="confirm-brands-btn">Confirm Brands</button>
+        </div>
+      </section>
+      {% endif %}
+
+      <section
+        id="analysis-section"
+        class="card analysis-shell{% if show_analysis_panel or summary_rows %} is-visible{% endif %}"
+      >
+        <div class="analysis-grid">
+          <div class="panel lhs-panel">
+            <h2>Define Paramaters</h2>
+
+            {% if preview_id %}
+            <form method="post" action="{{ url_for('analyze') }}" class="search-form analysis-form">
+              <input type="hidden" name="preview_id" value="{{ preview_id }}" />
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Brand Name</th>
+                      <th>Brand Description</th>
+                      <th>Estimated Google Reviews</th>
+                      <th>Reviews for This Analysis</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in analysis_rows %}
+                    <tr>
+                      <td>{{ row.brand_name }}</td>
+                      <td>{{ row.brand_description }}</td>
+                      <td>{{ row.estimated_review_count if row.estimated_review_count is not none else "Unknown" }}</td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          max="200"
+                          name="requested_reviews_{{ row.index }}"
+                          value="{{ row.requested_reviews }}"
+                        />
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="actions-row">
+                <button type="button" id="back-to-confirm" class="ghost-btn">Back</button>
+                <button type="submit">Run Analysis</button>
+              </div>
+            </form>
+            {% else %}
+            <p class="subtext">Preview brands first to configure analysis inputs.</p>
+            {% endif %}
+          </div>
+
+          <div class="panel rhs-panel" id="database-preview">
+            <h2>Previewed Database</h2>
+
+            {% if analysis_errors %}
+            <div class="error-list">
+              {% for err in analysis_errors %}
+              <div class="error-item">{{ err }}</div>
+              {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if summary_rows %}
+            <div class="table-block-header">
+              <h3>Summary Table</h3>
+              <a class="download-btn" href="{{ url_for('download_summary', report_id=report_id) }}">
+                Download Summary CSV
+              </a>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Brand Name</th>
+                    <th>Brand Description</th>
+                    <th>Number of Reviews</th>
+                    <th>Average Google Score</th>
+                    <th>Calculated NPS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in summary_rows %}
+                  <tr>
+                    <td>{{ row.brand_name }}</td>
+                    <td>{{ row.brand_description }}</td>
+                    <td>{{ row.review_count }}</td>
+                    <td>{{ row.avg_google_score if row.avg_google_score is not none else "N/A" }}</td>
+                    <td>{{ row.nps_score }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="table-block-header detail-header">
+              <h3>Detailed Reviews</h3>
+              <a class="download-btn" href="{{ url_for('download_report', report_id=report_id) }}">
+                Download Detailed CSV
+              </a>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Brand Name</th>
+                    <th>Store Name</th>
+                    <th>Review</th>
+                    <th>Date of Review</th>
+                    <th>Sentiment Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in detailed_rows %}
+                  <tr>
+                    <td>{{ row.brand_name }}</td>
+                    <td>{{ row.store_name }}</td>
+                    <td>{{ row.review_text }}</td>
+                    <td>{{ row.review_date }}</td>
+                    <td>{{ row.sentiment_score }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty-preview">your data will appear here</div>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="loading-overlay" class="loading-overlay" aria-hidden="true">
+      <div class="loading-card">
+        <div class="spinner"></div>
+        <p id="loading-text">Loading...</p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const maxBrands = 8;
+        const pageOne = document.getElementById("page-one");
+        const brandRows = document.getElementById("brand-rows");
+        const previewForm = document.getElementById("preview-form");
+        const addBrandBtn = document.getElementById("add-brand-btn");
+        const confirmBtn = document.getElementById("confirm-brands-btn");
+        const analysisSection = document.getElementById("analysis-section");
+        const analysisForm = document.querySelector(".analysis-form");
+        const backBtn = document.getElementById("back-to-confirm");
+        const confirmSection = document.getElementById("confirm-section");
+        const loadingOverlay = document.getElementById("loading-overlay");
+        const loadingText = document.getElementById("loading-text");
+        const autoScrollTarget = {{ auto_scroll_target|tojson }};
+
+        function showLoading(text) {
+          if (!loadingOverlay) return;
+          if (loadingText && text) loadingText.textContent = text;
+          loadingOverlay.classList.add("is-visible");
+          loadingOverlay.setAttribute("aria-hidden", "false");
+        }
+
+        function hideLoading() {
+          if (!loadingOverlay) return;
+          loadingOverlay.classList.remove("is-visible");
+          loadingOverlay.setAttribute("aria-hidden", "true");
+        }
+
+        function updateRemoveButtons() {
+          if (!brandRows) return;
+          const rows = brandRows.querySelectorAll(".brand-row");
+          rows.forEach((row) => {
+            const btn = row.querySelector(".remove-brand-btn");
+            if (!btn) return;
+            btn.style.visibility = rows.length > 1 ? "visible" : "hidden";
+          });
+        }
+
+        function addRow() {
+          if (!brandRows) return;
+          const current = brandRows.querySelectorAll(".brand-row").length;
+          if (current >= maxBrands) return;
+
+          const row = document.createElement("div");
+          row.className = "brand-row";
+          row.innerHTML = `
+            <input type="text" name="brand_name[]" placeholder="e.g. Starbucks" required />
+            <button type="button" class="ghost-btn remove-brand-btn">Remove</button>
+          `;
+          brandRows.appendChild(row);
+          updateRemoveButtons();
+        }
+
+        function showAnalysisStep(scroll = true) {
+          if (!analysisSection) return;
+          if (pageOne) pageOne.classList.add("is-hidden");
+          if (confirmSection) confirmSection.classList.add("is-hidden");
+          analysisSection.classList.add("is-visible");
+          if (scroll) analysisSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        function showPreviewStep() {
+          if (pageOne) pageOne.classList.remove("is-hidden");
+          if (confirmSection) confirmSection.classList.remove("is-hidden");
+          if (analysisSection) analysisSection.classList.remove("is-visible");
+          if (confirmSection) {
+            confirmSection.scrollIntoView({ behavior: "smooth", block: "start" });
+          } else if (pageOne) {
+            pageOne.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        }
+
+        if (addBrandBtn) addBrandBtn.addEventListener("click", addRow);
+
+        if (brandRows) {
+          brandRows.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            if (!target.classList.contains("remove-brand-btn")) return;
+
+            const rows = brandRows.querySelectorAll(".brand-row");
+            if (rows.length <= 1) return;
+            const row = target.closest(".brand-row");
+            if (row) row.remove();
+            updateRemoveButtons();
+          });
+          updateRemoveButtons();
+        }
+
+        if (previewForm) {
+          previewForm.addEventListener("submit", () => {
+            showLoading("Previewing places...");
+          });
+        }
+
+        if (confirmBtn) {
+          confirmBtn.addEventListener("click", () => {
+            showLoading("Loading define paramaters...");
+            setTimeout(() => {
+              hideLoading();
+              showAnalysisStep(true);
+            }, 550);
+          });
+        }
+
+        if (analysisForm) {
+          analysisForm.addEventListener("submit", () => {
+            showLoading("Running analysis...");
+          });
+        }
+
+        if (backBtn) {
+          backBtn.addEventListener("click", () => {
+            showPreviewStep();
+          });
+        }
+
+        if (autoScrollTarget && analysisSection) {
+          showAnalysisStep(false);
+          requestAnimationFrame(() => {
+            const target = document.getElementById(autoScrollTarget);
+            if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
