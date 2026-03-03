@@ -62,6 +62,8 @@ This repo now includes:
 - `runtime.txt`
 - `Dockerfile`
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/muhammady9646/sentiment-analyser)
+
 Deploy steps:
 
 1. Push this project to GitHub.
