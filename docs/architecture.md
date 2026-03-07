@@ -8,8 +8,8 @@ Given a company name, first preview geography-biased full store-name examples an
 
 - `app.py`
   - Flask web server
-  - HTTP routes for preview, analysis, and download
-  - In-memory preview/report caches
+  - HTTP routes for preview, async analysis, polling, and download
+  - In-memory preview/report/job caches
 - `services/serpapi_reviews.py`
   - SerpAPI integration
   - Place discovery via `google_maps` engine
@@ -34,20 +34,22 @@ Given a company name, first preview geography-biased full store-name examples an
    - Pulls Google-sourced business description text for verification
 3. User confirms the brand scope and transitions to page 2.
 4. User enters desired review counts per brand.
-5. `/analyze` route fetches review pages across matched stores and computes sentiment.
-6. Each review text is scored with DistilBERT and mapped to `1.0-10.0`.
-7. Scores are bucketed as:
+5. `/analyze` route queues a background analysis job and returns immediately.
+6. Frontend polls `/analysis-status/<job_id>` until complete.
+7. Worker fetches review pages across matched stores and computes sentiment.
+8. Each review text is scored with DistilBERT and mapped to `1.0-10.0`.
+9. Scores are bucketed as:
    - Promoter: `>= 9.0`
    - Passive: `>= 7.0 and < 9.0`
    - Detractor: `< 7.0`
-8. NPS is computed per brand.
-9. Summary and detailed tables are rendered on the right-side panel.
-10. CSV downloads are generated from cache:
+10. NPS is computed per brand.
+11. UI redirects to `/analysis-result/<job_id>` and renders summary/detailed tables.
+12. CSV downloads are generated from cache:
    - `/download-summary/<report_id>` for summary rows
    - `/download/<report_id>` for detailed rows with store tags
 
 ## State and Storage
 
-- Current implementation uses process memory for `PREVIEW_CACHE` and `REPORT_CACHE`.
+- Current implementation uses process memory for `PREVIEW_CACHE`, `REPORT_CACHE`, and `ANALYSIS_JOB_CACHE`.
 - Cached records are ephemeral and reset on server restart.
 - Max in-memory items retained per cache: `100`.

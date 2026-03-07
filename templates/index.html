@@ -167,6 +167,16 @@
           <div class="panel rhs-panel" id="database-preview">
             <h2>Previewed Database</h2>
 
+            {% if analysis_job_id and analysis_job_status in ["queued", "running"] %}
+            <div class="info" id="analysis-job-status">
+              Analysis is running in the background. {{ analysis_job_progress or "Queued for processing." }}
+            </div>
+            {% endif %}
+
+            {% if analysis_job_id and analysis_job_status == "failed" and analysis_job_error %}
+            <div class="error">{{ analysis_job_error }}</div>
+            {% endif %}
+
             {% if analysis_errors %}
             <div class="error-list">
               {% for err in analysis_errors %}
@@ -266,6 +276,9 @@
         const confirmSection = document.getElementById("confirm-section");
         const loadingOverlay = document.getElementById("loading-overlay");
         const loadingText = document.getElementById("loading-text");
+        const analysisJobId = {{ analysis_job_id|tojson }};
+        const analysisJobStatus = {{ analysis_job_status|tojson }};
+        const analysisJobStatusBox = document.getElementById("analysis-job-status");
         const autoScrollTarget = {{ auto_scroll_target|tojson }};
 
         function showLoading(text) {
@@ -279,6 +292,44 @@
           if (!loadingOverlay) return;
           loadingOverlay.classList.remove("is-visible");
           loadingOverlay.setAttribute("aria-hidden", "true");
+        }
+
+        function startAnalysisPolling() {
+          if (!analysisJobId) return;
+          if (analysisJobStatus !== "queued" && analysisJobStatus !== "running") return;
+
+          const statusUrl = `/analysis-status/${encodeURIComponent(analysisJobId)}`;
+          let isPolling = false;
+
+          const poll = async () => {
+            if (isPolling) return;
+            isPolling = true;
+
+            try {
+              const response = await fetch(statusUrl, { cache: "no-store" });
+              if (!response.ok) throw new Error("status check failed");
+              const payload = await response.json();
+
+              if (analysisJobStatusBox && payload.progress) {
+                analysisJobStatusBox.textContent = `Analysis is running in the background. ${payload.progress}`;
+              }
+
+              if (payload.status === "completed" || payload.status === "failed") {
+                const resultUrl = payload.result_url || `/analysis-result/${encodeURIComponent(analysisJobId)}`;
+                window.location.href = resultUrl;
+                return;
+              }
+            } catch (error) {
+              if (analysisJobStatusBox) {
+                analysisJobStatusBox.textContent = "Analysis is running in the background. Waiting for status update...";
+              }
+            } finally {
+              isPolling = false;
+            }
+          };
+
+          poll();
+          window.setInterval(poll, 2000);
         }
 
         function updateRemoveButtons() {
@@ -360,7 +411,7 @@
 
         if (analysisForm) {
           analysisForm.addEventListener("submit", () => {
-            showLoading("Running analysis...");
+            showLoading("Starting background analysis...");
           });
         }
 
@@ -377,6 +428,8 @@
             if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
           });
         }
+
+        startAnalysisPolling();
       })();
     </script>
   </body>

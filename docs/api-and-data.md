@@ -32,13 +32,23 @@ Form fields:
 
 Behavior:
 
-- Fetches reviews using SerpAPI `google_maps_reviews` engine across matched stores per brand.
-- Scores each review on `1-10`.
-- Computes per-brand summary metrics:
-  - review count
-  - average Google score
-  - calculated NPS
-- Renders summary and detailed tables.
+- Queues analysis as a background job and returns immediately.
+- Stores job metadata in memory and starts async processing.
+
+## `GET /analysis-status/<job_id>`
+
+- Returns JSON job status:
+  - `queued`
+  - `running`
+  - `completed`
+  - `failed`
+- Includes progress text and a result URL when finished.
+
+## `GET /analysis-result/<job_id>`
+
+- Renders the analysis workspace for that job.
+- When completed, shows summary + detailed tables.
+- When still running, keeps polling status from the frontend.
 
 Failure cases returned on page:
 

@@ -1,12 +1,14 @@
 import csv
+import concurrent.futures
 import io
 import os
+import threading
 import time
 import uuid
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, Response, abort, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request
 
 from services.serpapi_reviews import SerpApiError, SerpApiReviewClient
 from services.sentiment import SentimentScorer, calculate_nps, classify_nps_bucket
@@ -19,6 +21,12 @@ app = Flask(__name__)
 # In-memory caches for previews and downloadable reports.
 REPORT_CACHE: dict[str, dict[str, Any]] = {}
 PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
+ANALYSIS_JOB_CACHE: dict[str, dict[str, Any]] = {}
+ANALYSIS_JOB_LOCK = threading.Lock()
+ANALYSIS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="analysis-job",
+)
 MAX_CACHE_ITEMS = 100
 MAX_BRANDS = 8
 MAX_REVIEWS_PER_BRAND = 200
@@ -120,9 +128,187 @@ def _render_index(**kwargs: Any) -> str:
         "max_reviews_per_brand": MAX_REVIEWS_PER_BRAND,
         "max_total_reviews": MAX_TOTAL_REVIEWS_PER_ANALYSIS,
         "analysis_time_budget_seconds": ANALYSIS_TIME_BUDGET_SECONDS,
+        "analysis_job_id": kwargs.get("analysis_job_id"),
+        "analysis_job_status": kwargs.get("analysis_job_status", ""),
+        "analysis_job_progress": kwargs.get("analysis_job_progress", ""),
+        "analysis_job_error": kwargs.get("analysis_job_error", ""),
     }
     context.update(kwargs)
     return render_template("index.html", **context)
+
+
+def _update_analysis_job(job_id: str, **updates: Any) -> None:
+    with ANALYSIS_JOB_LOCK:
+        job = ANALYSIS_JOB_CACHE.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+
+
+def _get_analysis_job(job_id: str) -> dict[str, Any] | None:
+    with ANALYSIS_JOB_LOCK:
+        job = ANALYSIS_JOB_CACHE.get(job_id)
+        if not job:
+            return None
+        return dict(job)
+
+
+def _run_analysis_pipeline(
+    preview_brands: list[dict[str, Any]],
+    requested_counts: dict[int, int],
+    job_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    review_client = SerpApiReviewClient(api_key=os.getenv("SERPAPI_KEY"))
+    scorer = SentimentScorer()
+
+    summary_rows: list[dict[str, Any]] = []
+    detailed_rows: list[dict[str, Any]] = []
+    analysis_errors: list[str] = []
+    started_at = time.monotonic()
+    total_brands = len(preview_brands)
+
+    for index, brand in enumerate(preview_brands):
+        brand_name = str(brand.get("brand_name", "Unknown"))
+        if job_id:
+            _update_analysis_job(
+                job_id,
+                progress=f"Processing brand {index + 1}/{total_brands}: {brand_name}",
+            )
+
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds >= ANALYSIS_TIME_BUDGET_SECONDS:
+            analysis_errors.append(
+                "Analysis reached the server time budget. "
+                "Try smaller review counts or fewer brands per run."
+            )
+            break
+
+        desired_reviews = requested_counts.get(index, 0)
+        brand_description = str(brand.get("business_description", ""))
+        candidates = (brand.get("candidates") or [])[:MAX_ANALYSIS_CANDIDATES_PER_BRAND]
+
+        brand_sentiment_scores: list[float] = []
+        brand_google_ratings: list[float] = []
+
+        if desired_reviews > 0:
+            try:
+                raw_reviews, _ = review_client.fetch_reviews_for_candidates(
+                    candidates=candidates,
+                    max_reviews=desired_reviews,
+                )
+            except SerpApiError as exc:
+                analysis_errors.append(f"{brand_name}: {exc}")
+                raw_reviews = []
+
+            review_texts = [str(review.get("text", "")) for review in raw_reviews]
+            sentiment_scores = scorer.score_many_to_ten(review_texts)
+
+            for review, sentiment_score in zip(raw_reviews, sentiment_scores):
+                brand_sentiment_scores.append(sentiment_score)
+
+                rating = review.get("google_rating")
+                if isinstance(rating, (int, float)):
+                    brand_google_ratings.append(float(rating))
+
+                detailed_rows.append(
+                    {
+                        "brand_name": brand_name,
+                        "store_name": review.get("store_name", "Unknown"),
+                        "store_id": review.get("store_id", ""),
+                        "review_text": review["text"],
+                        "review_date": review["review_time"],
+                        "sentiment_score": sentiment_score,
+                        "google_rating": review.get("google_rating"),
+                        "nps_bucket": classify_nps_bucket(sentiment_score),
+                    }
+                )
+
+        avg_google_score = (
+            round(sum(brand_google_ratings) / len(brand_google_ratings), 2)
+            if brand_google_ratings
+            else None
+        )
+        nps_score = calculate_nps(brand_sentiment_scores)["nps_score"] if brand_sentiment_scores else 0.0
+
+        summary_rows.append(
+            {
+                "brand_name": brand_name,
+                "brand_description": brand_description,
+                "review_count": len(brand_sentiment_scores),
+                "avg_google_score": avg_google_score,
+                "nps_score": nps_score,
+            }
+        )
+
+    return summary_rows, detailed_rows, analysis_errors
+
+
+def _run_analysis_job(job_id: str) -> None:
+    job = _get_analysis_job(job_id)
+    if not job:
+        return
+
+    preview_brands = job.get("preview_brands") or []
+    requested_counts = job.get("requested_counts") or {}
+    if not isinstance(preview_brands, list) or not isinstance(requested_counts, dict):
+        _update_analysis_job(
+            job_id,
+            status="failed",
+            finished_at=time.time(),
+            progress="Failed.",
+            error="Analysis payload is invalid. Please run Preview again.",
+        )
+        return
+
+    _update_analysis_job(
+        job_id,
+        status="running",
+        started_at=time.time(),
+        progress="Initializing analysis resources...",
+    )
+
+    try:
+        summary_rows, detailed_rows, analysis_errors = _run_analysis_pipeline(
+            preview_brands=preview_brands,
+            requested_counts=requested_counts,
+            job_id=job_id,
+        )
+        report_id = _cache_record(
+            REPORT_CACHE,
+            {
+                "summary_rows": summary_rows,
+                "detailed_rows": detailed_rows,
+            },
+        )
+        info = "Analysis complete." if detailed_rows else "No review rows returned for selected brands."
+        _update_analysis_job(
+            job_id,
+            status="completed",
+            finished_at=time.time(),
+            progress="Completed.",
+            report_id=report_id,
+            summary_rows=summary_rows,
+            detailed_rows=detailed_rows,
+            analysis_errors=analysis_errors,
+            info=info,
+            error="",
+        )
+    except (SerpApiError, RuntimeError) as exc:
+        _update_analysis_job(
+            job_id,
+            status="failed",
+            finished_at=time.time(),
+            progress="Failed.",
+            error=str(exc),
+        )
+    except Exception as exc:
+        _update_analysis_job(
+            job_id,
+            status="failed",
+            finished_at=time.time(),
+            progress="Failed.",
+            error=f"Unexpected analysis failure: {exc}",
+        )
 
 
 @app.route("/", methods=["GET"])
@@ -265,9 +451,9 @@ def analyze() -> str:
         )
 
     try:
-        review_client = SerpApiReviewClient(api_key=os.getenv("SERPAPI_KEY"))
-        scorer = SentimentScorer()
-    except (SerpApiError, RuntimeError) as exc:
+        # Validate key early; model load and network-heavy work run in the background.
+        SerpApiReviewClient(api_key=os.getenv("SERPAPI_KEY"))
+    except SerpApiError as exc:
         return _render_index(
             error=str(exc),
             selected_geography=selected_geography,
@@ -279,100 +465,140 @@ def analyze() -> str:
             auto_scroll_target="analysis-section",
         )
 
-    summary_rows: list[dict[str, Any]] = []
-    detailed_rows: list[dict[str, Any]] = []
-    analysis_errors: list[str] = []
-    started_at = time.monotonic()
+    job_record = {
+        "status": "queued",
+        "progress": "Queued for processing.",
+        "error": "",
+        "created_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "preview_id": preview_id,
+        "selected_geography": selected_geography,
+        "brand_inputs": brand_inputs,
+        "preview_rows": _build_preview_rows(preview_brands),
+        "analysis_rows": _build_analysis_rows(preview_brands, requested_counts),
+        "preview_brands": preview_brands,
+        "requested_counts": requested_counts,
+        "report_id": None,
+        "summary_rows": [],
+        "detailed_rows": [],
+        "analysis_errors": [],
+        "info": "",
+    }
 
-    for index, brand in enumerate(preview_brands):
-        elapsed_seconds = time.monotonic() - started_at
-        if elapsed_seconds >= ANALYSIS_TIME_BUDGET_SECONDS:
-            analysis_errors.append(
-                "Analysis reached the server time budget. "
-                "Try smaller review counts or fewer brands per run."
-            )
-            break
+    with ANALYSIS_JOB_LOCK:
+        job_id = _cache_record(ANALYSIS_JOB_CACHE, job_record)
 
-        desired_reviews = requested_counts.get(index, 0)
-        brand_name = str(brand.get("brand_name", "Unknown"))
-        brand_description = str(brand.get("business_description", ""))
-        candidates = (brand.get("candidates") or [])[:MAX_ANALYSIS_CANDIDATES_PER_BRAND]
-
-        brand_sentiment_scores: list[float] = []
-        brand_google_ratings: list[float] = []
-
-        if desired_reviews > 0:
-            try:
-                raw_reviews, _ = review_client.fetch_reviews_for_candidates(
-                    candidates=candidates,
-                    max_reviews=desired_reviews,
-                )
-            except SerpApiError as exc:
-                analysis_errors.append(f"{brand_name}: {exc}")
-                raw_reviews = []
-
-            review_texts = [str(review.get("text", "")) for review in raw_reviews]
-            sentiment_scores = scorer.score_many_to_ten(review_texts)
-
-            for review, sentiment_score in zip(raw_reviews, sentiment_scores):
-                brand_sentiment_scores.append(sentiment_score)
-
-                rating = review.get("google_rating")
-                if isinstance(rating, (int, float)):
-                    brand_google_ratings.append(float(rating))
-
-                detailed_rows.append(
-                    {
-                        "brand_name": brand_name,
-                        "store_name": review.get("store_name", "Unknown"),
-                        "store_id": review.get("store_id", ""),
-                        "review_text": review["text"],
-                        "review_date": review["review_time"],
-                        "sentiment_score": sentiment_score,
-                        "google_rating": review.get("google_rating"),
-                        "nps_bucket": classify_nps_bucket(sentiment_score),
-                    }
-                )
-
-        avg_google_score = (
-            round(sum(brand_google_ratings) / len(brand_google_ratings), 2)
-            if brand_google_ratings
-            else None
+    try:
+        ANALYSIS_EXECUTOR.submit(_run_analysis_job, job_id)
+    except RuntimeError:
+        _update_analysis_job(
+            job_id,
+            status="failed",
+            finished_at=time.time(),
+            progress="Failed.",
+            error="Unable to queue analysis job. Please try again.",
         )
-        nps_score = calculate_nps(brand_sentiment_scores)["nps_score"] if brand_sentiment_scores else 0.0
-
-        summary_rows.append(
-            {
-                "brand_name": brand_name,
-                "brand_description": brand_description,
-                "review_count": len(brand_sentiment_scores),
-                "avg_google_score": avg_google_score,
-                "nps_score": nps_score,
-            }
+        return _render_index(
+            error="Unable to start background analysis. Please retry.",
+            selected_geography=selected_geography,
+            brand_inputs=brand_inputs,
+            preview_id=preview_id,
+            preview_rows=_build_preview_rows(preview_brands),
+            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            show_analysis_panel=True,
+            auto_scroll_target="analysis-section",
+            analysis_job_id=job_id,
+            analysis_job_status="failed",
+            analysis_job_error="Unable to queue analysis job. Please retry.",
         )
 
-    report_id = _cache_record(
-        REPORT_CACHE,
-        {
-            "summary_rows": summary_rows,
-            "detailed_rows": detailed_rows,
-        },
-    )
-
-    info = "Analysis complete." if detailed_rows else "No review rows returned for selected brands."
     return _render_index(
-        info=info,
+        info="Analysis started in the background. This page will refresh automatically when it is done.",
         selected_geography=selected_geography,
         brand_inputs=brand_inputs,
         preview_id=preview_id,
         preview_rows=_build_preview_rows(preview_brands),
         analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
-        summary_rows=summary_rows,
-        detailed_rows=detailed_rows,
-        analysis_errors=analysis_errors,
         show_analysis_panel=True,
         auto_scroll_target="analysis-section",
-        report_id=report_id,
+        analysis_job_id=job_id,
+        analysis_job_status="queued",
+        analysis_job_progress="Queued for processing.",
+    )
+
+
+@app.route("/analysis-status/<job_id>", methods=["GET"])
+def analysis_status(job_id: str) -> Response:
+    job = _get_analysis_job(job_id)
+    if not job:
+        return jsonify({"status": "missing", "error": "Analysis job not found."}), 404
+
+    status = str(job.get("status", "missing"))
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "status": status,
+        "progress": str(job.get("progress", "")),
+        "error": str(job.get("error", "")),
+    }
+    if status in {"completed", "failed"}:
+        payload["result_url"] = f"/analysis-result/{job_id}"
+    return jsonify(payload)
+
+
+@app.route("/analysis-result/<job_id>", methods=["GET"])
+def analysis_result(job_id: str) -> str:
+    job = _get_analysis_job(job_id)
+    if not job:
+        return _render_index(
+            error="Analysis job not found or expired. Please run analysis again.",
+            show_analysis_panel=True,
+            auto_scroll_target="analysis-section",
+        )
+
+    selected_geography = str(
+        job.get("selected_geography", SerpApiReviewClient.DEFAULT_GEOGRAPHY)
+    )
+    brand_inputs = job.get("brand_inputs") or [{"name": ""}]
+    preview_id = str(job.get("preview_id", ""))
+    preview_rows = job.get("preview_rows") or []
+    analysis_rows = job.get("analysis_rows") or []
+    status = str(job.get("status", "missing"))
+
+    base_context = {
+        "selected_geography": selected_geography,
+        "brand_inputs": brand_inputs,
+        "preview_id": preview_id,
+        "preview_rows": preview_rows,
+        "analysis_rows": analysis_rows,
+        "show_analysis_panel": True,
+        "auto_scroll_target": "analysis-section",
+        "analysis_job_id": job_id,
+        "analysis_job_status": status,
+        "analysis_job_progress": str(job.get("progress", "")),
+        "analysis_job_error": str(job.get("error", "")),
+    }
+
+    if status in {"queued", "running"}:
+        return _render_index(
+            info="Analysis is still running in the background.",
+            **base_context,
+        )
+
+    if status == "failed":
+        return _render_index(
+            error=str(job.get("error") or "Analysis failed."),
+            analysis_errors=job.get("analysis_errors", []),
+            **base_context,
+        )
+
+    return _render_index(
+        info=str(job.get("info") or "Analysis complete."),
+        summary_rows=job.get("summary_rows", []),
+        detailed_rows=job.get("detailed_rows", []),
+        analysis_errors=job.get("analysis_errors", []),
+        report_id=job.get("report_id"),
+        **base_context,
     )
 
 
