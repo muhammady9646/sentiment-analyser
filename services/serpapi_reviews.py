@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +21,7 @@ class ReviewRecord:
 
 class SerpApiReviewClient:
     SEARCH_URL = "https://serpapi.com/search.json"
+    REQUEST_TIMEOUT_SECONDS = float(os.getenv("SERPAPI_TIMEOUT_SECONDS", "12"))
     GEOGRAPHY_MAP: dict[str, dict[str, str | None]] = {
         "global": {"label": "Global (No Bias)", "gl": None},
         "us": {"label": "United States", "gl": "us"},
@@ -156,8 +157,6 @@ class SerpApiReviewClient:
             raise SerpApiError("No store candidates found to analyze.")
 
         total_target = max(1, max_reviews)
-        total_stores = len(candidates)
-        per_store_cap = max(1, math.ceil(total_target / total_stores))
 
         aggregated: list[dict[str, Any]] = []
         stores_with_reviews: list[str] = []
@@ -171,7 +170,7 @@ class SerpApiReviewClient:
             try:
                 store_name, _, reviews = self.fetch_reviews_for_candidate(
                     candidate=candidate,
-                    max_reviews=min(per_store_cap, remaining),
+                    max_reviews=remaining,
                 )
             except SerpApiError as exc:
                 # Allow partial success across a set of stores.
@@ -454,7 +453,11 @@ class SerpApiReviewClient:
 
     def _request_json(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = requests.get(self.SEARCH_URL, params=params, timeout=30)
+            response = requests.get(
+                self.SEARCH_URL,
+                params=params,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             if response.status_code >= 400:
                 try:
                     payload = response.json()

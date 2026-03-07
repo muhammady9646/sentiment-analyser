@@ -1,6 +1,7 @@
 import csv
 import io
 import os
+import time
 import uuid
 from typing import Any
 
@@ -23,6 +24,8 @@ MAX_BRANDS = 8
 MAX_REVIEWS_PER_BRAND = 200
 MAX_TOTAL_REVIEWS_PER_ANALYSIS = 80
 MAX_STORE_CANDIDATES_PER_BRAND = 3
+MAX_ANALYSIS_CANDIDATES_PER_BRAND = 2
+ANALYSIS_TIME_BUDGET_SECONDS = 85
 
 
 def _cache_record(cache: dict[str, dict[str, Any]], record: dict[str, Any]) -> str:
@@ -116,6 +119,7 @@ def _render_index(**kwargs: Any) -> str:
         "auto_scroll_target": kwargs.get("auto_scroll_target", ""),
         "max_reviews_per_brand": MAX_REVIEWS_PER_BRAND,
         "max_total_reviews": MAX_TOTAL_REVIEWS_PER_ANALYSIS,
+        "analysis_time_budget_seconds": ANALYSIS_TIME_BUDGET_SECONDS,
     }
     context.update(kwargs)
     return render_template("index.html", **context)
@@ -278,12 +282,21 @@ def analyze() -> str:
     summary_rows: list[dict[str, Any]] = []
     detailed_rows: list[dict[str, Any]] = []
     analysis_errors: list[str] = []
+    started_at = time.monotonic()
 
     for index, brand in enumerate(preview_brands):
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds >= ANALYSIS_TIME_BUDGET_SECONDS:
+            analysis_errors.append(
+                "Analysis reached the server time budget. "
+                "Try smaller review counts or fewer brands per run."
+            )
+            break
+
         desired_reviews = requested_counts.get(index, 0)
         brand_name = str(brand.get("brand_name", "Unknown"))
         brand_description = str(brand.get("business_description", ""))
-        candidates = brand.get("candidates") or []
+        candidates = (brand.get("candidates") or [])[:MAX_ANALYSIS_CANDIDATES_PER_BRAND]
 
         brand_sentiment_scores: list[float] = []
         brand_google_ratings: list[float] = []
