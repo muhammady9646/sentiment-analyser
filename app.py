@@ -21,6 +21,8 @@ PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
 MAX_CACHE_ITEMS = 100
 MAX_BRANDS = 8
 MAX_REVIEWS_PER_BRAND = 200
+MAX_TOTAL_REVIEWS_PER_ANALYSIS = 80
+MAX_STORE_CANDIDATES_PER_BRAND = 3
 
 
 def _cache_record(cache: dict[str, dict[str, Any]], record: dict[str, Any]) -> str:
@@ -112,6 +114,8 @@ def _render_index(**kwargs: Any) -> str:
         "analysis_errors": kwargs.get("analysis_errors", []),
         "show_analysis_panel": kwargs.get("show_analysis_panel", False),
         "auto_scroll_target": kwargs.get("auto_scroll_target", ""),
+        "max_reviews_per_brand": MAX_REVIEWS_PER_BRAND,
+        "max_total_reviews": MAX_TOTAL_REVIEWS_PER_ANALYSIS,
     }
     context.update(kwargs)
     return render_template("index.html", **context)
@@ -147,7 +151,7 @@ def preview() -> str:
                 company_name=brand["name"],
                 geography=geography,
                 location_hint="",
-                limit=5,
+                limit=MAX_STORE_CANDIDATES_PER_BRAND,
             )
             primary_candidate = candidates[0]
             business_description = review_client.fetch_business_description(
@@ -227,9 +231,26 @@ def analyze() -> str:
         raw = request.form.get(f"requested_reviews_{index}", "")
         requested_counts[index] = _parse_requested_reviews(raw)
 
+    total_requested = sum(requested_counts.values())
+
     if not any(count > 0 for count in requested_counts.values()):
         return _render_index(
             error="Enter review counts for at least one brand before running analysis.",
+            selected_geography=selected_geography,
+            brand_inputs=brand_inputs,
+            preview_id=preview_id,
+            preview_rows=_build_preview_rows(preview_brands),
+            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            show_analysis_panel=True,
+            auto_scroll_target="analysis-section",
+        )
+
+    if total_requested > MAX_TOTAL_REVIEWS_PER_ANALYSIS:
+        return _render_index(
+            error=(
+                "Requested review volume is too high for one web request. "
+                f"Keep total requested reviews at or below {MAX_TOTAL_REVIEWS_PER_ANALYSIS}."
+            ),
             selected_geography=selected_geography,
             brand_inputs=brand_inputs,
             preview_id=preview_id,
@@ -277,8 +298,10 @@ def analyze() -> str:
                 analysis_errors.append(f"{brand_name}: {exc}")
                 raw_reviews = []
 
-            for review in raw_reviews:
-                sentiment_score = scorer.score_to_ten(review["text"])
+            review_texts = [str(review.get("text", "")) for review in raw_reviews]
+            sentiment_scores = scorer.score_many_to_ten(review_texts)
+
+            for review, sentiment_score in zip(raw_reviews, sentiment_scores):
                 brand_sentiment_scores.append(sentiment_score)
 
                 rating = review.get("google_rating")

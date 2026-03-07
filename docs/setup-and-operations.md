@@ -60,9 +60,11 @@ Render flow:
 2. Create Render web service from repo (Blueprint or standard web service).
 3. Add env var:
    - `SERPAPI_KEY`
+   - `HF_HOME=/tmp/huggingface`
 4. Start command:
-   - `gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 180 app:app`
-5. Connect custom domain in Render and set DNS records at your domain registrar.
+   - `gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 600 app:app`
+5. After first deploy, run one analysis request to warm model cache.
+6. Connect custom domain in Render and set DNS records at your domain registrar.
 
 ## API Key Requirements
 

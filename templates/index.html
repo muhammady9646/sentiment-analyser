@@ -139,7 +139,7 @@
                         <input
                           type="number"
                           min="0"
-                          max="200"
+                          max="{{ max_reviews_per_brand }}"
                           name="requested_reviews_{{ row.index }}"
                           value="{{ row.requested_reviews }}"
                         />
@@ -149,6 +149,9 @@
                   </tbody>
                 </table>
               </div>
+              <p class="subtext">
+                Total requested reviews per run is capped at {{ max_total_reviews }} to avoid timeout on hosted deployments.
+              </p>
 
               <div class="actions-row">
                 <button type="button" id="back-to-confirm" class="ghost-btn">Back</button>

@@ -53,6 +53,7 @@ def calculate_nps(scores: list[float]) -> dict[str, Any]:
 
 class SentimentScorer:
     MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
+    BATCH_SIZE = 32
     _pipeline_instance: Any | None = None
 
     def __init__(self) -> None:
@@ -79,11 +80,52 @@ class SentimentScorer:
 
         self._pipeline = SentimentScorer._pipeline_instance
 
-    def score_to_ten(self, text: str) -> float:
-        cleaned = text.strip()
-        if not cleaned:
-            return 5.5
-        result = self._pipeline(cleaned, truncation=True)[0]
+    @staticmethod
+    def _extract_result_fields(result: Any) -> tuple[str, float]:
+        if not isinstance(result, dict):
+            return "", 0.0
+
         label = str(result.get("label", ""))
-        confidence = float(result.get("score", 0.0))
-        return map_label_confidence_to_ten(label, confidence)
+        raw_confidence = result.get("score", 0.0)
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return label, confidence
+
+    def score_many_to_ten(self, texts: list[str], batch_size: int | None = None) -> list[float]:
+        if not texts:
+            return []
+
+        scores = [5.5 for _ in texts]
+        clean_inputs: list[str] = []
+        clean_indexes: list[int] = []
+
+        for index, raw_text in enumerate(texts):
+            cleaned = str(raw_text).strip()
+            if not cleaned:
+                continue
+            clean_inputs.append(cleaned)
+            clean_indexes.append(index)
+
+        if not clean_inputs:
+            return scores
+
+        raw_results = self._pipeline(
+            clean_inputs,
+            truncation=True,
+            batch_size=batch_size or self.BATCH_SIZE,
+        )
+        if isinstance(raw_results, dict):
+            raw_results = [raw_results]
+        if not isinstance(raw_results, list):
+            return scores
+
+        for index, result in zip(clean_indexes, raw_results):
+            label, confidence = self._extract_result_fields(result)
+            scores[index] = map_label_confidence_to_ten(label, confidence)
+
+        return scores
+
+    def score_to_ten(self, text: str) -> float:
+        return self.score_many_to_ten([text])[0]

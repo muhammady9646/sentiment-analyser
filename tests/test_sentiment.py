@@ -1,6 +1,11 @@
 import unittest
 
-from services.sentiment import calculate_nps, classify_nps_bucket, map_label_confidence_to_ten
+from services.sentiment import (
+    SentimentScorer,
+    calculate_nps,
+    classify_nps_bucket,
+    map_label_confidence_to_ten,
+)
 
 
 class TestSentimentUtilities(unittest.TestCase):
@@ -23,6 +28,29 @@ class TestSentimentUtilities(unittest.TestCase):
         self.assertEqual(result["passives"], 1)
         self.assertEqual(result["detractors"], 2)
         self.assertEqual(result["nps_score"], 0.0)
+
+    def test_score_many_to_ten_batches_and_keeps_blank_defaults(self) -> None:
+        class FakePipeline:
+            def __init__(self) -> None:
+                self.seen_texts: list[str] = []
+                self.seen_batch_size: int | None = None
+
+            def __call__(self, texts, truncation=True, batch_size=None):
+                self.seen_texts = list(texts)
+                self.seen_batch_size = batch_size
+                return [
+                    {"label": "POSITIVE", "score": 1.0},
+                    {"label": "NEGATIVE", "score": 1.0},
+                ]
+
+        fake = FakePipeline()
+        scorer = SentimentScorer.__new__(SentimentScorer)
+        scorer._pipeline = fake
+
+        scores = scorer.score_many_to_ten(["Amazing service", " ", "Terrible support"], batch_size=16)
+        self.assertEqual(scores, [10.0, 5.5, 1.0])
+        self.assertEqual(fake.seen_texts, ["Amazing service", "Terrible support"])
+        self.assertEqual(fake.seen_batch_size, 16)
 
 
 if __name__ == "__main__":

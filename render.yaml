@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 180 app:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 600 app:app
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
@@ -12,4 +12,4 @@ services:
       - key: SERPAPI_KEY
         sync: false
       - key: HF_HOME
-        value: /opt/render/.cache/huggingface
+        value: /tmp/huggingface

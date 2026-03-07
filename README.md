@@ -70,7 +70,8 @@ Deploy steps:
 2. In Render, create a new Blueprint/Web Service from that repo.
 3. Set environment variable `SERPAPI_KEY` in Render.
 4. Deploy and wait for the first build to finish.
-5. Add your custom domain in Render settings and point DNS records from your domain registrar.
+5. Run one analysis request after deploy to warm the Hugging Face model cache (first run is slower).
+6. Add your custom domain in Render settings and point DNS records from your domain registrar.
 
 ## Downloads
 
