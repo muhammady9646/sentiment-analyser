@@ -47,6 +47,19 @@ flask --app app run --debug
 
 Then open `http://127.0.0.1:5000`.
 
+## Long-Running Analysis Notes
+
+- Analysis runs asynchronously in the background and UI polls job status.
+- Full detailed datasets are written to on-disk CSV files before download.
+- Large pull limits are configurable via env vars:
+  - `MAX_REVIEWS_PER_BRAND` (default `1000`)
+  - `MAX_TOTAL_REVIEWS_PER_ANALYSIS` (default `1000`)
+  - `ANALYSIS_TIME_BUDGET_SECONDS` (default `1800`)
+  - `ANALYSIS_SENTIMENT_BATCH_SIZE` (default `12`)
+  - `SENTIMENT_BATCH_SIZE` (default `12`)
+  - `SENTIMENT_DYNAMIC_QUANTIZE` (default `1`)
+  - `TORCH_NUM_THREADS` (default `1`)
+
 ## Test
 
 ```bash

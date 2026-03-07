@@ -183,6 +183,36 @@ class TestSerpApiReviews(unittest.TestCase):
         self.assertEqual(rows[0]["store_name"], "Store One")
         self.assertEqual(rows[2]["store_name"], "Store Two")
 
+    def test_iter_reviews_for_candidates_streams_and_respects_target(self):
+        responses = [
+            {
+                "reviews": [
+                    {"user": {"name": "U1"}, "snippet": "R1", "rating": 5, "date": "1 day ago"},
+                    {"user": {"name": "U2"}, "snippet": "R2", "rating": 4, "date": "2 days ago"},
+                ]
+            },
+            {
+                "reviews": [
+                    {"user": {"name": "U3"}, "snippet": "R3", "rating": 3, "date": "3 days ago"},
+                ]
+            },
+        ]
+        client = StubSerpApiClient(responses)
+        rows = list(
+            client.iter_reviews_for_candidates(
+                candidates=[
+                    {"id_key": "place_id", "id_value": "p1", "name": "Store One", "address": "A"},
+                    {"id_key": "place_id", "id_value": "p2", "name": "Store Two", "address": "B"},
+                ],
+                max_reviews=2,
+            )
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["store_name"], "Store One")
+        self.assertEqual(rows[1]["store_name"], "Store One")
+        self.assertEqual(rows[0]["text"], "R1")
+
     def test_fetch_business_description_from_knowledge_graph(self):
         responses = [
             {

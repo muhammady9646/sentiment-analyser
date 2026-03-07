@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from typing import Any
 
 
@@ -53,32 +55,70 @@ def calculate_nps(scores: list[float]) -> dict[str, Any]:
 
 class SentimentScorer:
     MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
-    BATCH_SIZE = 32
+    BATCH_SIZE = int(os.getenv("SENTIMENT_BATCH_SIZE", "12"))
+    QUANTIZE_DYNAMIC = os.getenv("SENTIMENT_DYNAMIC_QUANTIZE", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     _pipeline_instance: Any | None = None
+    _init_lock = threading.Lock()
 
     def __init__(self) -> None:
+        if SentimentScorer._pipeline_instance is None:
+            with SentimentScorer._init_lock:
+                if SentimentScorer._pipeline_instance is None:
+                    SentimentScorer._pipeline_instance = self._build_pipeline()
+
+        self._pipeline = SentimentScorer._pipeline_instance
+
+    @classmethod
+    def _build_pipeline(cls) -> Any:
         try:
-            from transformers import pipeline
+            import torch
+            import torch.nn as nn
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
         except ImportError as exc:
             raise RuntimeError(
                 "transformers/torch are not installed. Run: pip install -r requirements.txt"
             ) from exc
 
-        if SentimentScorer._pipeline_instance is None:
-            try:
-                SentimentScorer._pipeline_instance = pipeline(
-                    "sentiment-analysis",
-                    model=self.MODEL_NAME,
-                    tokenizer=self.MODEL_NAME,
-                    device=-1,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "Failed to load DistilBERT sentiment model. "
-                    "Check network/model download access and retry."
-                ) from exc
+        torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
 
-        self._pipeline = SentimentScorer._pipeline_instance
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
+            try:
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    cls.MODEL_NAME,
+                    low_cpu_mem_usage=True,
+                )
+            except ImportError:
+                # `low_cpu_mem_usage` needs `accelerate`; fallback keeps compatibility.
+                model = AutoModelForSequenceClassification.from_pretrained(cls.MODEL_NAME)
+
+            if cls.QUANTIZE_DYNAMIC:
+                try:
+                    model = torch.quantization.quantize_dynamic(
+                        model,
+                        {nn.Linear},
+                        dtype=torch.qint8,
+                    )
+                except Exception:
+                    # Continue with full precision model if quantization is unsupported.
+                    pass
+
+            return pipeline(
+                "sentiment-analysis",
+                model=model,
+                tokenizer=tokenizer,
+                device=-1,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to load DistilBERT sentiment model. "
+                "Check network/model download access and retry."
+            ) from exc
 
     @staticmethod
     def _extract_result_fields(result: Any) -> tuple[str, float]:

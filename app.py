@@ -8,13 +8,14 @@ import uuid
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
 from services.serpapi_reviews import SerpApiError, SerpApiReviewClient
-from services.sentiment import SentimentScorer, calculate_nps, classify_nps_bucket
+from services.sentiment import SentimentScorer, classify_nps_bucket
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 app = Flask(__name__)
 
@@ -23,17 +24,22 @@ REPORT_CACHE: dict[str, dict[str, Any]] = {}
 PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
 ANALYSIS_JOB_CACHE: dict[str, dict[str, Any]] = {}
 ANALYSIS_JOB_LOCK = threading.Lock()
+REPORT_CACHE_LOCK = threading.Lock()
 ANALYSIS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="analysis-job",
 )
 MAX_CACHE_ITEMS = 100
 MAX_BRANDS = 8
-MAX_REVIEWS_PER_BRAND = 200
-MAX_TOTAL_REVIEWS_PER_ANALYSIS = 80
+MAX_REVIEWS_PER_BRAND = int(os.getenv("MAX_REVIEWS_PER_BRAND", "1000"))
+MAX_TOTAL_REVIEWS_PER_ANALYSIS = int(os.getenv("MAX_TOTAL_REVIEWS_PER_ANALYSIS", "1000"))
 MAX_STORE_CANDIDATES_PER_BRAND = 3
 MAX_ANALYSIS_CANDIDATES_PER_BRAND = 2
-ANALYSIS_TIME_BUDGET_SECONDS = 85
+ANALYSIS_TIME_BUDGET_SECONDS = int(os.getenv("ANALYSIS_TIME_BUDGET_SECONDS", "1800"))
+ANALYSIS_SENTIMENT_BATCH_SIZE = int(os.getenv("ANALYSIS_SENTIMENT_BATCH_SIZE", "12"))
+DETAILED_PREVIEW_LIMIT = int(os.getenv("DETAILED_PREVIEW_LIMIT", "200"))
+REPORTS_DIR = os.path.join(BASE_DIR, "data", "reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
 def _cache_record(cache: dict[str, dict[str, Any]], record: dict[str, Any]) -> str:
@@ -44,6 +50,55 @@ def _cache_record(cache: dict[str, dict[str, Any]], record: dict[str, Any]) -> s
         cache.pop(oldest_key, None)
     return record_id
 
+
+def _cache_record_by_id(
+    cache: dict[str, dict[str, Any]],
+    record_id: str,
+    record: dict[str, Any],
+    lock: Any = None,
+) -> str:
+    if lock:
+        with lock:
+            cache[record_id] = record
+            if len(cache) > MAX_CACHE_ITEMS:
+                oldest_key = next(iter(cache))
+                cache.pop(oldest_key, None)
+    else:
+        cache[record_id] = record
+        if len(cache) > MAX_CACHE_ITEMS:
+            oldest_key = next(iter(cache))
+            cache.pop(oldest_key, None)
+    return record_id
+
+
+def _report_paths(report_id: str) -> tuple[str, str]:
+    summary_path = os.path.join(REPORTS_DIR, f"{report_id}_summary.csv")
+    detailed_path = os.path.join(REPORTS_DIR, f"{report_id}_detailed.csv")
+    return summary_path, detailed_path
+
+
+def _write_summary_csv(path: str, summary_rows: list[dict[str, Any]]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as fp:
+        writer = csv.writer(fp)
+        writer.writerow(
+            [
+                "brand_name",
+                "brand_description",
+                "number_of_reviews",
+                "average_google_score",
+                "calculated_nps",
+            ]
+        )
+        for row in summary_rows:
+            writer.writerow(
+                [
+                    row.get("brand_name", ""),
+                    row.get("brand_description", ""),
+                    row.get("review_count", 0),
+                    row.get("avg_google_score", ""),
+                    row.get("nps_score", 0.0),
+                ]
+            )
 
 def _parse_requested_reviews(raw_value: str) -> int:
     if not raw_value.strip():
@@ -156,91 +211,158 @@ def _get_analysis_job(job_id: str) -> dict[str, Any] | None:
 def _run_analysis_pipeline(
     preview_brands: list[dict[str, Any]],
     requested_counts: dict[int, int],
+    detailed_csv_path: str,
     job_id: str | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[str]]:
     review_client = SerpApiReviewClient(api_key=os.getenv("SERPAPI_KEY"))
     scorer = SentimentScorer()
 
     summary_rows: list[dict[str, Any]] = []
-    detailed_rows: list[dict[str, Any]] = []
+    detailed_preview_rows: list[dict[str, Any]] = []
+    detailed_row_count = 0
     analysis_errors: list[str] = []
     started_at = time.monotonic()
     total_brands = len(preview_brands)
+    os.makedirs(os.path.dirname(detailed_csv_path), exist_ok=True)
 
-    for index, brand in enumerate(preview_brands):
-        brand_name = str(brand.get("brand_name", "Unknown"))
-        if job_id:
-            _update_analysis_job(
-                job_id,
-                progress=f"Processing brand {index + 1}/{total_brands}: {brand_name}",
-            )
-
-        elapsed_seconds = time.monotonic() - started_at
-        if elapsed_seconds >= ANALYSIS_TIME_BUDGET_SECONDS:
-            analysis_errors.append(
-                "Analysis reached the server time budget. "
-                "Try smaller review counts or fewer brands per run."
-            )
-            break
-
-        desired_reviews = requested_counts.get(index, 0)
-        brand_description = str(brand.get("business_description", ""))
-        candidates = (brand.get("candidates") or [])[:MAX_ANALYSIS_CANDIDATES_PER_BRAND]
-
-        brand_sentiment_scores: list[float] = []
-        brand_google_ratings: list[float] = []
-
-        if desired_reviews > 0:
-            try:
-                raw_reviews, _ = review_client.fetch_reviews_for_candidates(
-                    candidates=candidates,
-                    max_reviews=desired_reviews,
-                )
-            except SerpApiError as exc:
-                analysis_errors.append(f"{brand_name}: {exc}")
-                raw_reviews = []
-
-            review_texts = [str(review.get("text", "")) for review in raw_reviews]
-            sentiment_scores = scorer.score_many_to_ten(review_texts)
-
-            for review, sentiment_score in zip(raw_reviews, sentiment_scores):
-                brand_sentiment_scores.append(sentiment_score)
-
-                rating = review.get("google_rating")
-                if isinstance(rating, (int, float)):
-                    brand_google_ratings.append(float(rating))
-
-                detailed_rows.append(
-                    {
-                        "brand_name": brand_name,
-                        "store_name": review.get("store_name", "Unknown"),
-                        "store_id": review.get("store_id", ""),
-                        "review_text": review["text"],
-                        "review_date": review["review_time"],
-                        "sentiment_score": sentiment_score,
-                        "google_rating": review.get("google_rating"),
-                        "nps_bucket": classify_nps_bucket(sentiment_score),
-                    }
-                )
-
-        avg_google_score = (
-            round(sum(brand_google_ratings) / len(brand_google_ratings), 2)
-            if brand_google_ratings
-            else None
-        )
-        nps_score = calculate_nps(brand_sentiment_scores)["nps_score"] if brand_sentiment_scores else 0.0
-
-        summary_rows.append(
-            {
-                "brand_name": brand_name,
-                "brand_description": brand_description,
-                "review_count": len(brand_sentiment_scores),
-                "avg_google_score": avg_google_score,
-                "nps_score": nps_score,
-            }
+    with open(detailed_csv_path, "w", newline="", encoding="utf-8") as detailed_fp:
+        detailed_writer = csv.writer(detailed_fp)
+        detailed_writer.writerow(
+            [
+                "brand_name",
+                "store_name",
+                "store_id",
+                "review",
+                "date_of_review",
+                "sentiment_score_1_to_10",
+                "google_rating",
+                "nps_bucket",
+            ]
         )
 
-    return summary_rows, detailed_rows, analysis_errors
+        for index, brand in enumerate(preview_brands):
+            brand_name = str(brand.get("brand_name", "Unknown"))
+            if job_id:
+                _update_analysis_job(
+                    job_id,
+                    progress=f"Processing brand {index + 1}/{total_brands}: {brand_name}",
+                )
+
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= ANALYSIS_TIME_BUDGET_SECONDS:
+                analysis_errors.append(
+                    "Analysis reached the server time budget. "
+                    "Try smaller review counts or fewer brands per run."
+                )
+                break
+
+            desired_reviews = requested_counts.get(index, 0)
+            brand_description = str(brand.get("business_description", ""))
+            candidates = (brand.get("candidates") or [])[:MAX_ANALYSIS_CANDIDATES_PER_BRAND]
+
+            review_count = 0
+            promoter_count = 0
+            detractor_count = 0
+            google_rating_total = 0.0
+            google_rating_count = 0
+            batch_reviews: list[dict[str, Any]] = []
+            batch_texts: list[str] = []
+
+            def flush_batch() -> None:
+                nonlocal review_count
+                nonlocal promoter_count
+                nonlocal detractor_count
+                nonlocal google_rating_total
+                nonlocal google_rating_count
+                nonlocal detailed_row_count
+                nonlocal batch_reviews
+                nonlocal batch_texts
+                if not batch_reviews:
+                    return
+                sentiment_scores = scorer.score_many_to_ten(
+                    batch_texts,
+                    batch_size=ANALYSIS_SENTIMENT_BATCH_SIZE,
+                )
+                for review, sentiment_score in zip(batch_reviews, sentiment_scores):
+                    review_count += 1
+                    if sentiment_score >= 9.0:
+                        promoter_count += 1
+                    elif sentiment_score < 7.0:
+                        detractor_count += 1
+
+                    rating = review.get("google_rating")
+                    if isinstance(rating, (int, float)):
+                        google_rating_total += float(rating)
+                        google_rating_count += 1
+
+                    nps_bucket = classify_nps_bucket(sentiment_score)
+                    detailed_writer.writerow(
+                        [
+                            brand_name,
+                            review.get("store_name", "Unknown"),
+                            review.get("store_id", ""),
+                            review.get("text", ""),
+                            review.get("review_time", ""),
+                            sentiment_score,
+                            review.get("google_rating", ""),
+                            nps_bucket,
+                        ]
+                    )
+
+                    if len(detailed_preview_rows) < DETAILED_PREVIEW_LIMIT:
+                        detailed_preview_rows.append(
+                            {
+                                "brand_name": brand_name,
+                                "store_name": review.get("store_name", "Unknown"),
+                                "store_id": review.get("store_id", ""),
+                                "review_text": review.get("text", ""),
+                                "review_date": review.get("review_time", ""),
+                                "sentiment_score": sentiment_score,
+                                "google_rating": review.get("google_rating"),
+                                "nps_bucket": nps_bucket,
+                            }
+                        )
+                    detailed_row_count += 1
+                batch_reviews = []
+                batch_texts = []
+
+            if desired_reviews > 0:
+                try:
+                    for review in review_client.iter_reviews_for_candidates(
+                        candidates=candidates,
+                        max_reviews=desired_reviews,
+                    ):
+                        batch_reviews.append(review)
+                        batch_texts.append(str(review.get("text", "")))
+                        if len(batch_reviews) >= ANALYSIS_SENTIMENT_BATCH_SIZE:
+                            flush_batch()
+                    flush_batch()
+                except SerpApiError as exc:
+                    analysis_errors.append(f"{brand_name}: {exc}")
+                    flush_batch()
+
+            avg_google_score = (
+                round(google_rating_total / google_rating_count, 2)
+                if google_rating_count
+                else None
+            )
+            nps_score = 0.0
+            if review_count:
+                promoter_pct = (promoter_count / review_count) * 100.0
+                detractor_pct = (detractor_count / review_count) * 100.0
+                nps_score = round(promoter_pct - detractor_pct, 2)
+
+            summary_rows.append(
+                {
+                    "brand_name": brand_name,
+                    "brand_description": brand_description,
+                    "review_count": review_count,
+                    "avg_google_score": avg_google_score,
+                    "nps_score": nps_score,
+                }
+            )
+
+    return summary_rows, detailed_preview_rows, detailed_row_count, analysis_errors
 
 
 def _run_analysis_job(job_id: str) -> None:
@@ -268,19 +390,35 @@ def _run_analysis_job(job_id: str) -> None:
     )
 
     try:
-        summary_rows, detailed_rows, analysis_errors = _run_analysis_pipeline(
+        report_id = str(uuid.uuid4())
+        summary_csv_path, detailed_csv_path = _report_paths(report_id)
+
+        summary_rows, detailed_preview_rows, detailed_row_count, analysis_errors = _run_analysis_pipeline(
             preview_brands=preview_brands,
             requested_counts=requested_counts,
+            detailed_csv_path=detailed_csv_path,
             job_id=job_id,
         )
-        report_id = _cache_record(
+
+        _write_summary_csv(summary_csv_path, summary_rows)
+        _cache_record_by_id(
             REPORT_CACHE,
+            report_id,
             {
                 "summary_rows": summary_rows,
-                "detailed_rows": detailed_rows,
+                "detailed_rows": detailed_preview_rows,
+                "detailed_row_count": detailed_row_count,
+                "summary_csv_path": summary_csv_path,
+                "detailed_csv_path": detailed_csv_path,
             },
+            lock=REPORT_CACHE_LOCK,
         )
-        info = "Analysis complete." if detailed_rows else "No review rows returned for selected brands."
+        info = "Analysis complete." if detailed_row_count else "No review rows returned for selected brands."
+        if detailed_row_count > DETAILED_PREVIEW_LIMIT:
+            info = (
+                f"{info} Showing first {DETAILED_PREVIEW_LIMIT} rows in page preview; "
+                "download CSV for full dataset."
+            )
         _update_analysis_job(
             job_id,
             status="completed",
@@ -288,7 +426,8 @@ def _run_analysis_job(job_id: str) -> None:
             progress="Completed.",
             report_id=report_id,
             summary_rows=summary_rows,
-            detailed_rows=detailed_rows,
+            detailed_rows=detailed_preview_rows,
+            detailed_row_count=detailed_row_count,
             analysis_errors=analysis_errors,
             info=info,
             error="",
@@ -438,7 +577,7 @@ def analyze() -> str:
     if total_requested > MAX_TOTAL_REVIEWS_PER_ANALYSIS:
         return _render_index(
             error=(
-                "Requested review volume is too high for one web request. "
+                "Requested review volume is too high for one analysis run. "
                 f"Keep total requested reviews at or below {MAX_TOTAL_REVIEWS_PER_ANALYSIS}."
             ),
             selected_geography=selected_geography,
@@ -482,6 +621,7 @@ def analyze() -> str:
         "report_id": None,
         "summary_rows": [],
         "detailed_rows": [],
+        "detailed_row_count": 0,
         "analysis_errors": [],
         "info": "",
     }
@@ -604,10 +744,22 @@ def analysis_result(job_id: str) -> str:
 
 @app.route("/download/<report_id>", methods=["GET"])
 def download_report(report_id: str) -> Response:
-    report = REPORT_CACHE.get(report_id)
+    with REPORT_CACHE_LOCK:
+        report = REPORT_CACHE.get(report_id)
     if not report:
         abort(404, description="Report not found or expired.")
 
+    detailed_csv_path = str(report.get("detailed_csv_path") or "")
+    if detailed_csv_path and os.path.isfile(detailed_csv_path):
+        return send_file(
+            detailed_csv_path,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name="sentiment_detailed_dataset.csv",
+            max_age=0,
+        )
+
+    # Fallback for in-memory legacy reports.
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
@@ -622,8 +774,7 @@ def download_report(report_id: str) -> Response:
             "nps_bucket",
         ]
     )
-
-    for row in report["detailed_rows"]:
+    for row in report.get("detailed_rows", []):
         writer.writerow(
             [
                 row.get("brand_name", ""),
@@ -636,12 +787,8 @@ def download_report(report_id: str) -> Response:
                 row.get("nps_bucket", ""),
             ]
         )
-
-    csv_data = buffer.getvalue()
-    buffer.close()
-
     return Response(
-        csv_data,
+        buffer.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": 'attachment; filename="sentiment_detailed_dataset.csv"'},
     )
@@ -649,10 +796,22 @@ def download_report(report_id: str) -> Response:
 
 @app.route("/download-summary/<report_id>", methods=["GET"])
 def download_summary(report_id: str) -> Response:
-    report = REPORT_CACHE.get(report_id)
+    with REPORT_CACHE_LOCK:
+        report = REPORT_CACHE.get(report_id)
     if not report:
         abort(404, description="Report not found or expired.")
 
+    summary_csv_path = str(report.get("summary_csv_path") or "")
+    if summary_csv_path and os.path.isfile(summary_csv_path):
+        return send_file(
+            summary_csv_path,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name="sentiment_summary_dataset.csv",
+            max_age=0,
+        )
+
+    # Fallback for in-memory legacy reports.
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
@@ -664,8 +823,7 @@ def download_summary(report_id: str) -> Response:
             "calculated_nps",
         ]
     )
-
-    for row in report["summary_rows"]:
+    for row in report.get("summary_rows", []):
         writer.writerow(
             [
                 row.get("brand_name", ""),
@@ -675,12 +833,8 @@ def download_summary(report_id: str) -> Response:
                 row.get("nps_score", 0.0),
             ]
         )
-
-    csv_data = buffer.getvalue()
-    buffer.close()
-
     return Response(
-        csv_data,
+        buffer.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": 'attachment; filename="sentiment_summary_dataset.csv"'},
     )

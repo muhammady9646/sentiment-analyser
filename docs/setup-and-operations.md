@@ -43,7 +43,7 @@ App URL:
 
 Expected result:
 
-- `Ran 12 tests ... OK`
+- `Ran 14 tests ... OK`
 
 ## Production Deploy
 
@@ -61,6 +61,9 @@ Render flow:
 3. Add env var:
    - `SERPAPI_KEY`
    - `HF_HOME=/tmp/huggingface`
+   - `SENTIMENT_DYNAMIC_QUANTIZE=1`
+   - `TORCH_NUM_THREADS=1`
+   - `MAX_TOTAL_REVIEWS_PER_ANALYSIS=1000`
 4. Start command:
    - `gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 600 app:app`
 5. After first deploy, run one analysis request to warm model cache.

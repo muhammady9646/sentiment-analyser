@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 
@@ -196,6 +196,50 @@ class SerpApiReviewClient:
             raise SerpApiError(errors[0])
         raise SerpApiError("No text reviews found for the matched stores.")
 
+    def iter_reviews_for_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        max_reviews: int = 20,
+    ) -> Iterator[dict[str, Any]]:
+        if not candidates:
+            raise SerpApiError("No store candidates found to analyze.")
+
+        total_target = max(1, max_reviews)
+        yielded = 0
+        errors: list[str] = []
+
+        for candidate in candidates:
+            if yielded >= total_target:
+                break
+
+            id_key = candidate.get("id_key")
+            id_value = candidate.get("id_value")
+            if not isinstance(id_key, str) or not isinstance(id_value, str):
+                errors.append("Place candidate is missing a valid identifier.")
+                continue
+
+            store_name = str(candidate.get("name") or "Unknown")
+            try:
+                for review in self._iter_reviews_paginated(
+                    id_key=id_key,
+                    place_id_or_data_id=id_value,
+                    max_reviews=total_target - yielded,
+                ):
+                    row = dict(review.__dict__)
+                    row["store_name"] = store_name
+                    row["store_id"] = str(candidate.get("id_value") or "")
+                    yield row
+                    yielded += 1
+                    if yielded >= total_target:
+                        break
+            except SerpApiError as exc:
+                errors.append(str(exc))
+
+        if yielded == 0:
+            if errors:
+                raise SerpApiError(errors[0])
+            raise SerpApiError("No text reviews found for the matched stores.")
+
     def fetch_reviews(
         self,
         company_name: str,
@@ -332,12 +376,23 @@ class SerpApiReviewClient:
     def _fetch_reviews_paginated(
         self, id_key: str, place_id_or_data_id: str, max_reviews: int
     ) -> list[ReviewRecord]:
-        reviews: list[ReviewRecord] = []
+        return list(
+            self._iter_reviews_paginated(
+                id_key=id_key,
+                place_id_or_data_id=place_id_or_data_id,
+                max_reviews=max_reviews,
+            )
+        )
+
+    def _iter_reviews_paginated(
+        self, id_key: str, place_id_or_data_id: str, max_reviews: int
+    ) -> Iterator[ReviewRecord]:
+        yielded = 0
         next_page_token: str | None = None
         seen_tokens: set[str] = set()
         seen_reviews: set[tuple[str, str, str]] = set()
 
-        while len(reviews) < max_reviews:
+        while yielded < max_reviews:
             params: dict[str, Any] = {
                 "engine": "google_maps_reviews",
                 "api_key": self.api_key,
@@ -348,7 +403,7 @@ class SerpApiReviewClient:
                 if next_page_token in seen_tokens:
                     break
                 params["next_page_token"] = next_page_token
-                params["num"] = min(20, max_reviews - len(reviews))
+                params["num"] = min(20, max_reviews - yielded)
                 seen_tokens.add(next_page_token)
 
             payload = self._request_json(params)
@@ -367,32 +422,27 @@ class SerpApiReviewClient:
                 review_time = (
                     str(raw.get("date") or raw.get("published_at") or raw.get("relative_date") or "Unknown")
                 )
-
                 signature = (author_name, text, review_time)
                 if signature in seen_reviews:
                     continue
 
                 seen_reviews.add(signature)
-                reviews.append(
-                    ReviewRecord(
-                        author_name=author_name,
-                        text=text,
-                        google_rating=self._extract_rating(raw.get("rating")),
-                        review_time=review_time,
-                    )
+                yielded += 1
+                yield ReviewRecord(
+                    author_name=author_name,
+                    text=text,
+                    google_rating=self._extract_rating(raw.get("rating")),
+                    review_time=review_time,
                 )
-
-                if len(reviews) >= max_reviews:
+                if yielded >= max_reviews:
                     break
 
-            if len(reviews) >= max_reviews:
+            if yielded >= max_reviews:
                 break
 
             next_page_token = payload.get("serpapi_pagination", {}).get("next_page_token")
             if not next_page_token:
                 break
-
-        return reviews
 
     @staticmethod
     def _extract_review_text(review: dict[str, Any]) -> str:

@@ -28,12 +28,14 @@ Behavior:
 Form fields:
 
 - `preview_id` (required)
-- `requested_reviews_<index>` (optional per brand, clamped to `0-200`)
+- `requested_reviews_<index>` (optional per brand, clamped to configured limits)
 
 Behavior:
 
 - Queues analysis as a background job and returns immediately.
 - Stores job metadata in memory and starts async processing.
+- Streams review rows in chunks through sentiment scoring.
+- Writes full CSV outputs to on-disk report files.
 
 ## `GET /analysis-status/<job_id>`
 
@@ -47,8 +49,9 @@ Behavior:
 ## `GET /analysis-result/<job_id>`
 
 - Renders the analysis workspace for that job.
-- When completed, shows summary + detailed tables.
+- When completed, shows summary + detailed table preview.
 - When still running, keeps polling status from the frontend.
+- Full datasets are always available via download CSV links.
 
 Failure cases returned on page:
 
