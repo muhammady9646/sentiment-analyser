@@ -15,7 +15,7 @@
       </div>
     </header>
 
-    <main class="container">
+    <main class="page-layout">
       <section class="card hero-card{% if show_analysis_panel %} is-hidden{% endif %}" id="page-one">
         <h1>Brand Sentiment Workspace</h1>
         <p class="subtext">
@@ -71,6 +71,7 @@
       <section class="card{% if show_analysis_panel %} is-hidden{% endif %}" id="confirm-section">
         <h2>Confirm Brands</h2>
         <p class="subtext">Review store examples and descriptions for each brand before analysis.</p>
+        {% set selected_index_set = selected_brand_indexes or [] %}
 
         <div class="table-wrap">
           <table>
@@ -80,6 +81,7 @@
                 <th>Store Name Examples</th>
                 <th>Google Business Description</th>
                 <th>Geography</th>
+                <th>Check</th>
               </tr>
             </thead>
             <tbody>
@@ -95,6 +97,17 @@
                 </td>
                 <td>{{ row.business_description }}</td>
                 <td>{{ row.geography_label }}</td>
+                <td class="confirm-checkbox-cell">
+                  <label class="check-toggle">
+                    <input
+                      type="checkbox"
+                      class="brand-select-checkbox"
+                      data-brand-index="{{ loop.index0 }}"
+                      {% if not selected_index_set or loop.index0 in selected_index_set %}checked{% endif %}
+                    />
+                    <span>Check</span>
+                  </label>
+                </td>
               </tr>
               {% endfor %}
             </tbody>
@@ -113,41 +126,46 @@
       >
         <div class="analysis-grid">
           <div class="panel lhs-panel">
-            <h2>Define Paramaters</h2>
+            <h2>Define Parameters</h2>
 
             {% if preview_id %}
             <form method="post" action="{{ url_for('analyze') }}" class="search-form analysis-form">
               <input type="hidden" name="preview_id" value="{{ preview_id }}" />
+              <div id="selected-brand-fields"></div>
 
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Brand Name</th>
-                      <th>Brand Description</th>
-                      <th>Estimated Google Reviews</th>
-                      <th>Reviews for This Analysis</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {% for row in analysis_rows %}
-                    <tr>
-                      <td>{{ row.brand_name }}</td>
-                      <td>{{ row.brand_description }}</td>
-                      <td>{{ row.estimated_review_count if row.estimated_review_count is not none else "Unknown" }}</td>
-                      <td>
-                        <input
-                          type="number"
-                          min="0"
-                          max="{{ max_reviews_per_brand }}"
-                          name="requested_reviews_{{ row.index }}"
-                          value="{{ row.requested_reviews }}"
-                        />
-                      </td>
-                    </tr>
-                    {% endfor %}
-                  </tbody>
-                </table>
+              <div id="analysis-parameter-list" class="vertical-parameter-list">
+                {% for row in analysis_rows %}
+                <div class="vertical-parameter-item" data-brand-index="{{ row.index }}">
+                  <table class="vertical-parameter-table">
+                    <tbody>
+                      <tr>
+                        <th>Brand Name</th>
+                        <td>{{ row.brand_name }}</td>
+                      </tr>
+                      <tr>
+                        <th>Brand Description</th>
+                        <td>{{ row.brand_description }}</td>
+                      </tr>
+                      <tr>
+                        <th>Estimated Google Reviews</th>
+                        <td>{{ row.estimated_review_count if row.estimated_review_count is not none else "Unknown" }}</td>
+                      </tr>
+                      <tr>
+                        <th>Reviews for This Analysis</th>
+                        <td>
+                          <input
+                            type="number"
+                            min="0"
+                            max="{{ max_reviews_per_brand }}"
+                            name="requested_reviews_{{ row.index }}"
+                            value="{{ row.requested_reviews }}"
+                          />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {% endfor %}
               </div>
               <p class="subtext">
                 Total requested reviews per run is capped at {{ max_total_reviews }} to avoid timeout on hosted deployments.
@@ -166,12 +184,6 @@
 
           <div class="panel rhs-panel" id="database-preview">
             <h2>Previewed Database</h2>
-
-            {% if analysis_job_id and analysis_job_status in ["queued", "running"] %}
-            <div class="info" id="analysis-job-status">
-              Analysis is running in the background. {{ analysis_job_progress or "Queued for processing." }}
-            </div>
-            {% endif %}
 
             {% if analysis_job_id and analysis_job_status == "failed" and analysis_job_error %}
             <div class="error">{{ analysis_job_error }}</div>
@@ -250,6 +262,15 @@
             {% else %}
             <div class="empty-preview">your data will appear here</div>
             {% endif %}
+
+            {% if analysis_job_id and analysis_job_status in ["queued", "running"] %}
+            <div class="analysis-loading-status" id="analysis-job-status">
+              <span class="inline-spinner" aria-hidden="true"></span>
+              <span class="analysis-loading-text">
+                {{ analysis_job_progress or "Queued for processing." }}
+              </span>
+            </div>
+            {% endif %}
           </div>
         </div>
       </section>
@@ -274,11 +295,17 @@
         const analysisForm = document.querySelector(".analysis-form");
         const backBtn = document.getElementById("back-to-confirm");
         const confirmSection = document.getElementById("confirm-section");
+        const selectedBrandFields = document.getElementById("selected-brand-fields");
+        const parameterItems = Array.from(document.querySelectorAll(".vertical-parameter-item"));
+        const brandSelectBoxes = Array.from(document.querySelectorAll(".brand-select-checkbox"));
         const loadingOverlay = document.getElementById("loading-overlay");
         const loadingText = document.getElementById("loading-text");
         const analysisJobId = {{ analysis_job_id|tojson }};
         const analysisJobStatus = {{ analysis_job_status|tojson }};
         const analysisJobStatusBox = document.getElementById("analysis-job-status");
+        const analysisJobStatusText = analysisJobStatusBox
+          ? analysisJobStatusBox.querySelector(".analysis-loading-text")
+          : null;
         const autoScrollTarget = {{ auto_scroll_target|tojson }};
 
         function showLoading(text) {
@@ -310,8 +337,8 @@
               if (!response.ok) throw new Error("status check failed");
               const payload = await response.json();
 
-              if (analysisJobStatusBox && payload.progress) {
-                analysisJobStatusBox.textContent = `Analysis is running in the background. ${payload.progress}`;
+              if (analysisJobStatusText && payload.progress) {
+                analysisJobStatusText.textContent = payload.progress;
               }
 
               if (payload.status === "completed" || payload.status === "failed") {
@@ -320,8 +347,8 @@
                 return;
               }
             } catch (error) {
-              if (analysisJobStatusBox) {
-                analysisJobStatusBox.textContent = "Analysis is running in the background. Waiting for status update...";
+              if (analysisJobStatusText) {
+                analysisJobStatusText.textContent = "Waiting for status update...";
               }
             } finally {
               isPolling = false;
@@ -376,6 +403,51 @@
           }
         }
 
+        function syncSelectedBrands(showValidation = false) {
+          if (!brandSelectBoxes.length) return true;
+
+          const selectedIndexes = brandSelectBoxes
+            .filter((box) => box.checked)
+            .map((box) => Number.parseInt(box.dataset.brandIndex || "", 10))
+            .filter((value) => Number.isInteger(value));
+
+          if (!selectedIndexes.length) {
+            if (showValidation) window.alert("Select at least one brand to continue.");
+            parameterItems.forEach((item) => {
+              item.classList.remove("is-hidden");
+              item.querySelectorAll("input, select, textarea").forEach((field) => {
+                field.disabled = false;
+              });
+            });
+            return false;
+          }
+
+          const selectedSet = new Set(selectedIndexes);
+          parameterItems.forEach((item) => {
+            const index = Number.parseInt(item.dataset.brandIndex || "", 10);
+            const isSelected = selectedSet.has(index);
+            item.classList.toggle("is-hidden", !isSelected);
+            item.querySelectorAll("input, select, textarea").forEach((field) => {
+              field.disabled = !isSelected;
+            });
+          });
+
+          if (selectedBrandFields) {
+            selectedBrandFields.innerHTML = "";
+            selectedIndexes
+              .sort((a, b) => a - b)
+              .forEach((index) => {
+                const hidden = document.createElement("input");
+                hidden.type = "hidden";
+                hidden.name = "selected_brand_indexes[]";
+                hidden.value = String(index);
+                selectedBrandFields.appendChild(hidden);
+              });
+          }
+
+          return true;
+        }
+
         if (addBrandBtn) addBrandBtn.addEventListener("click", addRow);
 
         if (brandRows) {
@@ -393,6 +465,12 @@
           updateRemoveButtons();
         }
 
+        brandSelectBoxes.forEach((box) => {
+          box.addEventListener("change", () => {
+            syncSelectedBrands(false);
+          });
+        });
+
         if (previewForm) {
           previewForm.addEventListener("submit", () => {
             showLoading("Previewing places...");
@@ -401,7 +479,8 @@
 
         if (confirmBtn) {
           confirmBtn.addEventListener("click", () => {
-            showLoading("Loading define paramaters...");
+            if (!syncSelectedBrands(true)) return;
+            showLoading("Loading define parameters...");
             setTimeout(() => {
               hideLoading();
               showAnalysisStep(true);
@@ -410,7 +489,11 @@
         }
 
         if (analysisForm) {
-          analysisForm.addEventListener("submit", () => {
+          analysisForm.addEventListener("submit", (event) => {
+            if (!syncSelectedBrands(true)) {
+              event.preventDefault();
+              return;
+            }
             showLoading("Starting background analysis...");
           });
         }
@@ -421,14 +504,17 @@
           });
         }
 
-        if (autoScrollTarget && analysisSection) {
-          showAnalysisStep(false);
+        if (autoScrollTarget) {
+          if (autoScrollTarget === "analysis-section" && analysisSection) {
+            showAnalysisStep(false);
+          }
           requestAnimationFrame(() => {
             const target = document.getElementById(autoScrollTarget);
             if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
           });
         }
 
+        syncSelectedBrands(false);
         startAnalysisPolling();
       })();
     </script>

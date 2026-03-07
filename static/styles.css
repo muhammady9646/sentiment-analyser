@@ -1,18 +1,18 @@
 :root {
-  --bg: #f4f5f8;
-  --bg-grad-a: #f9f1ff;
-  --bg-grad-b: #ffecee;
+  --bg: #f3f6fb;
+  --bg-grad-a: #e7eef8;
+  --bg-grad-b: #e5f4f2;
   --card: #ffffff;
-  --ink: #171422;
-  --muted: #625f6f;
-  --line: #e2dee9;
-  --line-soft: #ece9f1;
-  --primary: #7e22ce;
-  --primary-dark: #6b1ac0;
-  --accent: #e11d48;
-  --accent-dark: #be123c;
-  --ok-bg: #efe8ff;
-  --ok-ink: #4c1d95;
+  --ink: #17212d;
+  --muted: #5b6775;
+  --line: #d4deea;
+  --line-soft: #e3eaf3;
+  --primary: #1f5f99;
+  --primary-dark: #174a79;
+  --accent: #0f766e;
+  --accent-dark: #0a5a54;
+  --ok-bg: #e6f2ff;
+  --ok-ink: #1b4b75;
   --danger-bg: #ffe5ec;
   --danger-ink: #9f1239;
 }
@@ -31,10 +31,17 @@ body {
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background:
-    radial-gradient(circle at 12% 8%, var(--bg-grad-a) 0%, transparent 38%),
-    radial-gradient(circle at 88% 12%, var(--bg-grad-b) 0%, transparent 42%),
-    var(--bg);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle at 12% 9%, var(--bg-grad-a) 0%, transparent 38%),
+    radial-gradient(circle at 88% 12%, var(--bg-grad-b) 0%, transparent 44%),
+    linear-gradient(rgba(39, 89, 145, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(39, 89, 145, 0.06) 1px, transparent 1px);
+  background-size:
+    auto,
+    auto,
+    24px 24px,
+    24px 24px;
 }
 
 .site-header {
@@ -78,10 +85,9 @@ body {
   display: none !important;
 }
 
-.container {
-  max-width: 1320px;
-  margin: 28px auto 46px;
-  padding: 0 20px;
+.page-layout {
+  margin: 28px 0 46px;
+  padding: 0 clamp(14px, 2.7vw, 34px);
   display: grid;
   gap: 18px;
 }
@@ -162,8 +168,8 @@ select {
 input:focus,
 select:focus {
   outline: none;
-  border-color: #cfa3ff;
-  box-shadow: 0 0 0 3px rgba(157, 78, 221, 0.18);
+  border-color: #8cb4de;
+  box-shadow: 0 0 0 3px rgba(63, 127, 191, 0.2);
 }
 
 button {
@@ -212,7 +218,7 @@ button:hover {
 .info {
   background: var(--ok-bg);
   color: var(--ok-ink);
-  border-color: #d9c2ff;
+  border-color: #b9d6f5;
 }
 
 .error {
@@ -243,9 +249,62 @@ td {
 }
 
 th {
-  background: #faf9fc;
-  color: #473e5a;
+  background: #f4f7fc;
+  color: #39506a;
   font-weight: 600;
+}
+
+.confirm-checkbox-cell {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.check-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f7fbff;
+  color: #2a435c;
+  font-size: 0.82rem;
+}
+
+.check-toggle input {
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.vertical-parameter-list {
+  display: grid;
+  gap: 11px;
+}
+
+.vertical-parameter-item {
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  overflow: hidden;
+  background: #fbfdff;
+}
+
+.vertical-parameter-table {
+  min-width: 0;
+}
+
+.vertical-parameter-table th {
+  width: 250px;
+  background: #f3f8ff;
+  color: #39516a;
+}
+
+.vertical-parameter-table td {
+  background: #fff;
+}
+
+.vertical-parameter-table input {
+  width: min(220px, 100%);
 }
 
 .tiny-muted {
@@ -261,9 +320,9 @@ th {
 }
 
 .chip {
-  border: 1px solid #e5d5fa;
-  background: #f8f2ff;
-  color: #5b21b6;
+  border: 1px solid #cfe0f3;
+  background: #eff6ff;
+  color: #1f4d7a;
   border-radius: 999px;
   padding: 4px 9px;
   font-size: 0.78rem;
@@ -294,10 +353,10 @@ th {
   min-height: 280px;
   display: grid;
   place-items: center;
-  border: 1px dashed #cab6e7;
+  border: 1px dashed #b6cde5;
   border-radius: 12px;
-  color: #6d6680;
-  background: #fbf8ff;
+  color: #5d6c7a;
+  background: #f7fbff;
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
@@ -339,6 +398,25 @@ th {
   color: #9f1239;
   border-radius: 8px;
   padding: 8px 10px;
+}
+
+.analysis-loading-status {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #29445c;
+  font-size: 0.92rem;
+}
+
+.inline-spinner {
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  border: 2px solid #c9dcf2;
+  border-top-color: var(--primary);
+  animation: spin 0.85s linear infinite;
+  flex-shrink: 0;
 }
 
 .loading-overlay {
@@ -395,7 +473,7 @@ th {
 }
 
 @media (max-width: 760px) {
-  .container {
+  .page-layout {
     padding: 0 12px;
   }
 
@@ -423,5 +501,11 @@ th {
 
   #add-brand-btn {
     margin-right: 0;
+  }
+
+  .vertical-parameter-table th,
+  .vertical-parameter-table td {
+    display: block;
+    width: 100%;
   }
 }

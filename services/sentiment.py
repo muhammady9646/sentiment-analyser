@@ -55,6 +55,11 @@ def calculate_nps(scores: list[float]) -> dict[str, Any]:
 
 class SentimentScorer:
     MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
+    # Pin revision for deterministic downloads and reduced supply-chain risk.
+    MODEL_REVISION = os.getenv(
+        "SENTIMENT_MODEL_REVISION",
+        "714eb0fa89d2f80546fda750413ed43d93601a13",
+    ).strip()
     BATCH_SIZE = int(os.getenv("SENTIMENT_BATCH_SIZE", "12"))
     QUANTIZE_DYNAMIC = os.getenv("SENTIMENT_DYNAMIC_QUANTIZE", "1").strip().lower() in {
         "1",
@@ -87,15 +92,22 @@ class SentimentScorer:
         torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
 
         try:
-            tokenizer = AutoTokenizer.from_pretrained(cls.MODEL_NAME)
+            tokenizer = AutoTokenizer.from_pretrained(
+                cls.MODEL_NAME,
+                revision=cls.MODEL_REVISION or None,
+            )
             try:
                 model = AutoModelForSequenceClassification.from_pretrained(
                     cls.MODEL_NAME,
+                    revision=cls.MODEL_REVISION or None,
                     low_cpu_mem_usage=True,
                 )
             except ImportError:
                 # `low_cpu_mem_usage` needs `accelerate`; fallback keeps compatibility.
-                model = AutoModelForSequenceClassification.from_pretrained(cls.MODEL_NAME)
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    cls.MODEL_NAME,
+                    revision=cls.MODEL_REVISION or None,
+                )
 
             if cls.QUANTIZE_DYNAMIC:
                 try:
@@ -104,9 +116,15 @@ class SentimentScorer:
                         {nn.Linear},
                         dtype=torch.qint8,
                     )
-                except Exception:
+                except Exception as quantization_exc:
                     # Continue with full precision model if quantization is unsupported.
-                    pass
+                    if os.getenv("SENTIMENT_LOG_QUANTIZE_ERRORS", "").strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }:
+                        print(f"Dynamic quantization skipped: {quantization_exc}")
 
             return pipeline(
                 "sentiment-analysis",

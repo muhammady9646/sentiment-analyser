@@ -23,6 +23,8 @@ Then edit `.env` and set:
 
 ```env
 SERPAPI_KEY=your_serpapi_key_here
+FLASK_DEBUG=0
+SENTIMENT_MODEL_REVISION=714eb0fa89d2f80546fda750413ed43d93601a13
 ```
 
 ## Run
@@ -62,6 +64,7 @@ Render flow:
    - `SERPAPI_KEY`
    - `HF_HOME=/tmp/huggingface`
    - `SENTIMENT_DYNAMIC_QUANTIZE=1`
+   - `SENTIMENT_MODEL_REVISION=714eb0fa89d2f80546fda750413ed43d93601a13`
    - `TORCH_NUM_THREADS=1`
    - `MAX_TOTAL_REVIEWS_PER_ANALYSIS=1000`
 4. Start command:

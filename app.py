@@ -141,13 +141,16 @@ def _build_preview_rows(preview_brands: list[dict[str, Any]]) -> list[dict[str, 
 def _build_analysis_rows(
     preview_brands: list[dict[str, Any]],
     requested_counts: dict[int, int] | None = None,
+    source_indexes: list[int] | None = None,
 ) -> list[dict[str, Any]]:
+    source_indexes = source_indexes or list(range(len(preview_brands)))
     rows: list[dict[str, Any]] = []
-    for index, brand in enumerate(preview_brands):
-        requested = (requested_counts or {}).get(index, 0)
+    for position, brand in enumerate(preview_brands):
+        source_index = source_indexes[position] if position < len(source_indexes) else position
+        requested = (requested_counts or {}).get(source_index, 0)
         rows.append(
             {
-                "index": index,
+                "index": source_index,
                 "brand_name": brand.get("brand_name", ""),
                 "brand_description": brand.get("business_description", ""),
                 "estimated_review_count": brand.get("estimated_review_count"),
@@ -164,6 +167,28 @@ def _brand_inputs_from_preview(preview_brands: list[dict[str, Any]]) -> list[dic
         }
         for brand in preview_brands
     ]
+
+
+def _parse_selected_brand_indexes(raw_values: list[str], total_brands: int) -> list[int]:
+    if total_brands <= 0:
+        return []
+    if not raw_values:
+        return list(range(total_brands))
+
+    selected: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_values:
+        try:
+            index = int(str(raw).strip())
+        except ValueError:
+            continue
+        if index < 0 or index >= total_brands:
+            continue
+        if index in seen:
+            continue
+        seen.add(index)
+        selected.append(index)
+    return selected
 
 
 def _render_index(**kwargs: Any) -> str:
@@ -187,6 +212,7 @@ def _render_index(**kwargs: Any) -> str:
         "analysis_job_status": kwargs.get("analysis_job_status", ""),
         "analysis_job_progress": kwargs.get("analysis_job_progress", ""),
         "analysis_job_error": kwargs.get("analysis_job_error", ""),
+        "selected_brand_indexes": kwargs.get("selected_brand_indexes", []),
     }
     context.update(kwargs)
     return render_template("index.html", **context)
@@ -531,6 +557,7 @@ def preview() -> str:
         preview_id=preview_id,
         preview_rows=_build_preview_rows(preview_brands),
         analysis_rows=_build_analysis_rows(preview_brands),
+        selected_brand_indexes=list(range(len(preview_brands))),
         show_analysis_panel=False,
     )
 
@@ -544,32 +571,57 @@ def analyze() -> str:
             error="Preview expired or missing. Please run Preview Places again before analyzing.",
         )
 
-    preview_brands = preview_record.get("brands", [])
-    if not preview_brands:
+    all_preview_brands = preview_record.get("brands", [])
+    if not all_preview_brands:
         return _render_index(
             error="No brand preview data found. Please run Preview Places again.",
         )
 
-    brand_inputs = _brand_inputs_from_preview(preview_brands)
     selected_geography = preview_record.get(
         "selected_geography", SerpApiReviewClient.DEFAULT_GEOGRAPHY
     )
+    selected_source_indexes = _parse_selected_brand_indexes(
+        request.form.getlist("selected_brand_indexes[]"),
+        len(all_preview_brands),
+    )
+    if not selected_source_indexes:
+        return _render_index(
+            error="Select at least one brand in Confirm Brands before running analysis.",
+            selected_geography=selected_geography,
+            brand_inputs=_brand_inputs_from_preview(all_preview_brands),
+            preview_id=preview_id,
+            preview_rows=_build_preview_rows(all_preview_brands),
+            analysis_rows=_build_analysis_rows(all_preview_brands),
+            selected_brand_indexes=list(range(len(all_preview_brands))),
+            show_analysis_panel=True,
+            auto_scroll_target="analysis-section",
+        )
 
-    requested_counts: dict[int, int] = {}
-    for index in range(len(preview_brands)):
-        raw = request.form.get(f"requested_reviews_{index}", "")
-        requested_counts[index] = _parse_requested_reviews(raw)
+    selected_preview_brands = [all_preview_brands[index] for index in selected_source_indexes]
+    brand_inputs = _brand_inputs_from_preview(selected_preview_brands)
+    preview_rows = _build_preview_rows(all_preview_brands)
 
-    total_requested = sum(requested_counts.values())
+    requested_counts_by_source: dict[int, int] = {}
+    for source_index in selected_source_indexes:
+        raw = request.form.get(f"requested_reviews_{source_index}", "")
+        requested_counts_by_source[source_index] = _parse_requested_reviews(raw)
 
-    if not any(count > 0 for count in requested_counts.values()):
+    total_requested = sum(requested_counts_by_source.values())
+    analysis_rows = _build_analysis_rows(
+        selected_preview_brands,
+        requested_counts_by_source,
+        source_indexes=selected_source_indexes,
+    )
+
+    if not any(count > 0 for count in requested_counts_by_source.values()):
         return _render_index(
             error="Enter review counts for at least one brand before running analysis.",
             selected_geography=selected_geography,
             brand_inputs=brand_inputs,
             preview_id=preview_id,
-            preview_rows=_build_preview_rows(preview_brands),
-            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            preview_rows=preview_rows,
+            analysis_rows=analysis_rows,
+            selected_brand_indexes=selected_source_indexes,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -583,8 +635,9 @@ def analyze() -> str:
             selected_geography=selected_geography,
             brand_inputs=brand_inputs,
             preview_id=preview_id,
-            preview_rows=_build_preview_rows(preview_brands),
-            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            preview_rows=preview_rows,
+            analysis_rows=analysis_rows,
+            selected_brand_indexes=selected_source_indexes,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -598,11 +651,17 @@ def analyze() -> str:
             selected_geography=selected_geography,
             brand_inputs=brand_inputs,
             preview_id=preview_id,
-            preview_rows=_build_preview_rows(preview_brands),
-            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            preview_rows=preview_rows,
+            analysis_rows=analysis_rows,
+            selected_brand_indexes=selected_source_indexes,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
+
+    analysis_requested_counts = {
+        target_index: requested_counts_by_source[source_index]
+        for target_index, source_index in enumerate(selected_source_indexes)
+    }
 
     job_record = {
         "status": "queued",
@@ -614,10 +673,11 @@ def analyze() -> str:
         "preview_id": preview_id,
         "selected_geography": selected_geography,
         "brand_inputs": brand_inputs,
-        "preview_rows": _build_preview_rows(preview_brands),
-        "analysis_rows": _build_analysis_rows(preview_brands, requested_counts),
-        "preview_brands": preview_brands,
-        "requested_counts": requested_counts,
+        "preview_rows": preview_rows,
+        "selected_brand_indexes": selected_source_indexes,
+        "analysis_rows": analysis_rows,
+        "preview_brands": selected_preview_brands,
+        "requested_counts": analysis_requested_counts,
         "report_id": None,
         "summary_rows": [],
         "detailed_rows": [],
@@ -644,8 +704,9 @@ def analyze() -> str:
             selected_geography=selected_geography,
             brand_inputs=brand_inputs,
             preview_id=preview_id,
-            preview_rows=_build_preview_rows(preview_brands),
-            analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+            preview_rows=preview_rows,
+            analysis_rows=analysis_rows,
+            selected_brand_indexes=selected_source_indexes,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
             analysis_job_id=job_id,
@@ -658,8 +719,9 @@ def analyze() -> str:
         selected_geography=selected_geography,
         brand_inputs=brand_inputs,
         preview_id=preview_id,
-        preview_rows=_build_preview_rows(preview_brands),
-        analysis_rows=_build_analysis_rows(preview_brands, requested_counts),
+        preview_rows=preview_rows,
+        analysis_rows=analysis_rows,
+        selected_brand_indexes=selected_source_indexes,
         show_analysis_panel=True,
         auto_scroll_target="analysis-section",
         analysis_job_id=job_id,
@@ -711,6 +773,7 @@ def analysis_result(job_id: str) -> str:
         "preview_id": preview_id,
         "preview_rows": preview_rows,
         "analysis_rows": analysis_rows,
+        "selected_brand_indexes": job.get("selected_brand_indexes", []),
         "show_analysis_panel": True,
         "auto_scroll_target": "analysis-section",
         "analysis_job_id": job_id,
@@ -841,4 +904,5 @@ def download_summary(report_id: str) -> Response:
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    debug_enabled = os.getenv("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    app.run(debug=debug_enabled)

@@ -35,6 +35,8 @@ pip install -r requirements.txt
 
 ```env
 SERPAPI_KEY=your_serpapi_key_here
+FLASK_DEBUG=0
+SENTIMENT_MODEL_REVISION=714eb0fa89d2f80546fda750413ed43d93601a13
 ```
 
 4. Ensure your SerpAPI account has quota enabled.
@@ -58,6 +60,7 @@ Then open `http://127.0.0.1:5000`.
   - `ANALYSIS_SENTIMENT_BATCH_SIZE` (default `12`)
   - `SENTIMENT_BATCH_SIZE` (default `12`)
   - `SENTIMENT_DYNAMIC_QUANTIZE` (default `1`)
+  - `SENTIMENT_MODEL_REVISION` (default pinned commit hash)
   - `TORCH_NUM_THREADS` (default `1`)
 
 ## Test
