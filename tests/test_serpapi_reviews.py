@@ -205,12 +205,13 @@ class TestSerpApiReviews(unittest.TestCase):
                     {"id_key": "place_id", "id_value": "p2", "name": "Store Two", "address": "B"},
                 ],
                 max_reviews=2,
+                shuffle_candidates=False,
             )
         )
 
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["store_name"], "Store One")
-        self.assertEqual(rows[1]["store_name"], "Store One")
+        self.assertEqual(rows[1]["store_name"], "Store Two")
         self.assertEqual(rows[0]["text"], "R1")
 
     def test_fetch_business_description_from_knowledge_graph(self):

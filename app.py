@@ -11,7 +11,15 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
 from services.serpapi_reviews import SerpApiError, SerpApiReviewClient
-from services.sentiment import SentimentScorer, classify_nps_bucket
+from services.sentiment import (
+    AspectSentimentScorer,
+    SentimentScorer,
+    aspect_choices,
+    build_selected_aspects,
+    classify_nps_bucket,
+    default_aspect_values,
+    normalize_custom_aspect_values,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
@@ -34,12 +42,25 @@ MAX_BRANDS = 8
 MAX_REVIEWS_PER_BRAND = int(os.getenv("MAX_REVIEWS_PER_BRAND", "1000"))
 MAX_TOTAL_REVIEWS_PER_ANALYSIS = int(os.getenv("MAX_TOTAL_REVIEWS_PER_ANALYSIS", "1000"))
 MAX_STORE_CANDIDATES_PER_BRAND = 3
-MAX_ANALYSIS_CANDIDATES_PER_BRAND = 2
+MAX_ANALYSIS_CANDIDATES_PER_BRAND = max(
+    1,
+    int(os.getenv("MAX_ANALYSIS_CANDIDATES_PER_BRAND", "3")),
+)
 ANALYSIS_TIME_BUDGET_SECONDS = int(os.getenv("ANALYSIS_TIME_BUDGET_SECONDS", "1800"))
 ANALYSIS_SENTIMENT_BATCH_SIZE = int(os.getenv("ANALYSIS_SENTIMENT_BATCH_SIZE", "12"))
 DETAILED_PREVIEW_LIMIT = int(os.getenv("DETAILED_PREVIEW_LIMIT", "200"))
 REPORTS_DIR = os.path.join(BASE_DIR, "data", "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
+DEFAULT_SELECTED_ASPECT_VALUES = default_aspect_values()
+DEFAULT_SELECTED_ASPECTS, _ = build_selected_aspects(DEFAULT_SELECTED_ASPECT_VALUES, "")
+TERMINAL_ANALYSIS_STATUSES = {"completed", "failed", "cancelled"}
+ACTIVE_ANALYSIS_STATUSES = {"queued", "running", "paused"}
+PAUSED_ANALYSIS_PROGRESS = "Paused. Click Resume to continue."
+CANCELLING_ANALYSIS_PROGRESS = "Cancelling analysis..."
+
+
+class AnalysisCancelledError(Exception):
+    pass
 
 
 def _cache_record(cache: dict[str, dict[str, Any]], record: dict[str, Any]) -> str:
@@ -77,28 +98,51 @@ def _report_paths(report_id: str) -> tuple[str, str]:
     return summary_path, detailed_path
 
 
-def _write_summary_csv(path: str, summary_rows: list[dict[str, Any]]) -> None:
+def _write_summary_csv(
+    path: str,
+    summary_rows: list[dict[str, Any]],
+    selected_aspects: list[dict[str, Any]],
+) -> None:
     with open(path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
-        writer.writerow(
-            [
-                "brand_name",
-                "brand_description",
-                "number_of_reviews",
-                "average_google_score",
-                "calculated_nps",
-            ]
-        )
+        headers = [
+            "brand_name",
+            "brand_description",
+            "number_of_reviews",
+            "average_google_score",
+            "calculated_nps",
+        ]
+        for aspect in selected_aspects:
+            aspect_label = str(aspect.get("label", "")).strip() or "Aspect"
+            headers.append(f"{aspect_label} sentiment (1-10)")
+            headers.append(f"{aspect_label} mentions")
+
+        writer.writerow(headers)
         for row in summary_rows:
-            writer.writerow(
-                [
-                    row.get("brand_name", ""),
-                    row.get("brand_description", ""),
-                    row.get("review_count", 0),
-                    row.get("avg_google_score", ""),
-                    row.get("nps_score", 0.0),
-                ]
-            )
+            values = [
+                row.get("brand_name", ""),
+                row.get("brand_description", ""),
+                row.get("review_count", 0),
+                row.get("avg_google_score", ""),
+                row.get("nps_score", 0.0),
+            ]
+            aspect_averages = row.get("aspect_averages", {})
+            aspect_mentions = row.get("aspect_mentions", {})
+            for aspect in selected_aspects:
+                aspect_key = str(aspect.get("key", "")).strip()
+                avg_score = (
+                    aspect_averages.get(aspect_key)
+                    if isinstance(aspect_averages, dict)
+                    else None
+                )
+                mention_count = (
+                    aspect_mentions.get(aspect_key)
+                    if isinstance(aspect_mentions, dict)
+                    else None
+                )
+                values.append(avg_score if avg_score is not None else "N/A")
+                values.append(mention_count if isinstance(mention_count, int) else 0)
+            writer.writerow(values)
 
 def _parse_requested_reviews(raw_value: str) -> int:
     if not raw_value.strip():
@@ -191,12 +235,53 @@ def _parse_selected_brand_indexes(raw_values: list[str], total_brands: int) -> l
     return selected
 
 
+def _serialize_aspect_values(raw_values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in raw_values or []:
+        cleaned = str(value).strip().lower()
+        if not cleaned or cleaned in normalized:
+            continue
+        normalized.append(cleaned)
+    return normalized
+
+
+def _parse_selected_aspects(form: Any) -> tuple[list[dict[str, Any]], list[str], list[str], str | None]:
+    selected_values = _serialize_aspect_values(form.getlist("aspects[]"))
+    legacy_custom = str(form.get("custom_aspect", "")).strip()
+    raw_custom_values = form.getlist("custom_aspects[]")
+    if legacy_custom:
+        raw_custom_values.append(legacy_custom)
+    custom_aspect_values = normalize_custom_aspect_values(raw_custom_values)
+    selected_aspects, aspect_error = build_selected_aspects(selected_values, custom_aspect_values)
+
+    return selected_aspects, selected_values, custom_aspect_values, aspect_error
+
+
 def _render_index(**kwargs: Any) -> str:
     selected_geography = SerpApiReviewClient.normalize_geography(kwargs.get("selected_geography"))
     brand_inputs = kwargs.get("brand_inputs") or [{"name": ""}]
+    selected_aspect_values_raw = kwargs.get("selected_aspect_values")
+    if selected_aspect_values_raw is None:
+        selected_aspect_values = DEFAULT_SELECTED_ASPECT_VALUES.copy()
+    elif isinstance(selected_aspect_values_raw, str):
+        selected_aspect_values = _serialize_aspect_values([selected_aspect_values_raw])
+    else:
+        selected_aspect_values = _serialize_aspect_values(
+            [str(value) for value in selected_aspect_values_raw]
+        )
+    custom_aspect_values = normalize_custom_aspect_values(kwargs.get("custom_aspect_values"))
+    selected_aspects_raw = kwargs.get("selected_aspects")
+    selected_aspects = (
+        selected_aspects_raw if selected_aspects_raw is not None else DEFAULT_SELECTED_ASPECTS
+    )
+
     context = {
         "geography_choices": SerpApiReviewClient.geography_choices(),
+        "aspect_choices": aspect_choices(),
         "selected_geography": selected_geography,
+        "selected_aspect_values": selected_aspect_values,
+        "custom_aspect_values": custom_aspect_values,
+        "selected_aspects": selected_aspects,
         "brand_inputs": brand_inputs,
         "preview_rows": kwargs.get("preview_rows", []),
         "analysis_rows": kwargs.get("analysis_rows", []),
@@ -234,14 +319,46 @@ def _get_analysis_job(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
+def _check_job_pause_or_cancel(job_id: str | None) -> None:
+    if not job_id:
+        return
+
+    while True:
+        job = _get_analysis_job(job_id)
+        if not job:
+            raise AnalysisCancelledError("Analysis job no longer exists.")
+
+        if bool(job.get("cancel_requested")):
+            raise AnalysisCancelledError("Analysis cancelled by user.")
+
+        if bool(job.get("pause_requested")):
+            _update_analysis_job(
+                job_id,
+                status="paused",
+                progress=PAUSED_ANALYSIS_PROGRESS,
+            )
+            time.sleep(0.5)
+            continue
+
+        if str(job.get("status", "")) == "paused":
+            _update_analysis_job(
+                job_id,
+                status="running",
+                progress="Resuming analysis...",
+            )
+        return
+
+
 def _run_analysis_pipeline(
     preview_brands: list[dict[str, Any]],
     requested_counts: dict[int, int],
     detailed_csv_path: str,
+    selected_aspects: list[dict[str, Any]],
     job_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[str]]:
     review_client = SerpApiReviewClient(api_key=os.getenv("SERPAPI_KEY"))
     scorer = SentimentScorer()
+    aspect_scorer = AspectSentimentScorer(base_scorer=scorer)
 
     summary_rows: list[dict[str, Any]] = []
     detailed_preview_rows: list[dict[str, Any]] = []
@@ -264,9 +381,14 @@ def _run_analysis_pipeline(
                 "google_rating",
                 "nps_bucket",
             ]
+            + [
+                f"{str(aspect.get('label', 'Aspect')).strip() or 'Aspect'} sentiment (1-10)"
+                for aspect in selected_aspects
+            ]
         )
 
         for index, brand in enumerate(preview_brands):
+            _check_job_pause_or_cancel(job_id)
             brand_name = str(brand.get("brand_name", "Unknown"))
             if job_id:
                 _update_analysis_job(
@@ -291,6 +413,13 @@ def _run_analysis_pipeline(
             detractor_count = 0
             google_rating_total = 0.0
             google_rating_count = 0
+            store_review_counts: dict[str, int] = {}
+            aspect_score_totals = {
+                str(aspect.get("key", "")): 0.0 for aspect in selected_aspects
+            }
+            aspect_score_counts = {
+                str(aspect.get("key", "")): 0 for aspect in selected_aspects
+            }
             batch_reviews: list[dict[str, Any]] = []
             batch_texts: list[str] = []
 
@@ -305,11 +434,23 @@ def _run_analysis_pipeline(
                 nonlocal batch_texts
                 if not batch_reviews:
                     return
+                _check_job_pause_or_cancel(job_id)
                 sentiment_scores = scorer.score_many_to_ten(
                     batch_texts,
                     batch_size=ANALYSIS_SENTIMENT_BATCH_SIZE,
                 )
-                for review, sentiment_score in zip(batch_reviews, sentiment_scores):
+                _check_job_pause_or_cancel(job_id)
+                aspect_scores_list = aspect_scorer.score_aspects_for_many(
+                    batch_texts,
+                    selected_aspects=selected_aspects,
+                    batch_size=ANALYSIS_SENTIMENT_BATCH_SIZE,
+                )
+
+                for review, sentiment_score, aspect_scores in zip(
+                    batch_reviews,
+                    sentiment_scores,
+                    aspect_scores_list,
+                ):
                     review_count += 1
                     if sentiment_score >= 9.0:
                         promoter_count += 1
@@ -321,31 +462,60 @@ def _run_analysis_pipeline(
                         google_rating_total += float(rating)
                         google_rating_count += 1
 
+                    store_name = str(review.get("store_name", "Unknown"))
+                    store_review_counts[store_name] = store_review_counts.get(store_name, 0) + 1
+
                     nps_bucket = classify_nps_bucket(sentiment_score)
-                    detailed_writer.writerow(
-                        [
-                            brand_name,
-                            review.get("store_name", "Unknown"),
-                            review.get("store_id", ""),
-                            review.get("text", ""),
-                            review.get("review_time", ""),
-                            sentiment_score,
-                            review.get("google_rating", ""),
-                            nps_bucket,
-                        ]
-                    )
+                    row_values: list[Any] = [
+                        brand_name,
+                        store_name,
+                        review.get("store_id", ""),
+                        review.get("text", ""),
+                        review.get("review_time", ""),
+                        sentiment_score,
+                        review.get("google_rating", ""),
+                        nps_bucket,
+                    ]
+
+                    for aspect in selected_aspects:
+                        aspect_key = str(aspect.get("key", ""))
+                        aspect_score = (
+                            aspect_scores.get(aspect_key)
+                            if isinstance(aspect_scores, dict)
+                            else None
+                        )
+                        if isinstance(aspect_score, (int, float)):
+                            aspect_score_totals[aspect_key] = (
+                                aspect_score_totals.get(aspect_key, 0.0) + float(aspect_score)
+                            )
+                            aspect_score_counts[aspect_key] = (
+                                aspect_score_counts.get(aspect_key, 0) + 1
+                            )
+                            row_values.append(aspect_score)
+                        else:
+                            row_values.append("N/A")
+
+                    detailed_writer.writerow(row_values)
 
                     if len(detailed_preview_rows) < DETAILED_PREVIEW_LIMIT:
                         detailed_preview_rows.append(
                             {
                                 "brand_name": brand_name,
-                                "store_name": review.get("store_name", "Unknown"),
+                                "store_name": store_name,
                                 "store_id": review.get("store_id", ""),
                                 "review_text": review.get("text", ""),
                                 "review_date": review.get("review_time", ""),
                                 "sentiment_score": sentiment_score,
                                 "google_rating": review.get("google_rating"),
                                 "nps_bucket": nps_bucket,
+                                "aspect_scores": {
+                                    str(aspect.get("key", "")): (
+                                        aspect_scores.get(str(aspect.get("key", "")))
+                                        if isinstance(aspect_scores, dict)
+                                        else None
+                                    )
+                                    for aspect in selected_aspects
+                                },
                             }
                         )
                     detailed_row_count += 1
@@ -358,6 +528,7 @@ def _run_analysis_pipeline(
                         candidates=candidates,
                         max_reviews=desired_reviews,
                     ):
+                        _check_job_pause_or_cancel(job_id)
                         batch_reviews.append(review)
                         batch_texts.append(str(review.get("text", "")))
                         if len(batch_reviews) >= ANALYSIS_SENTIMENT_BATCH_SIZE:
@@ -378,6 +549,18 @@ def _run_analysis_pipeline(
                 detractor_pct = (detractor_count / review_count) * 100.0
                 nps_score = round(promoter_pct - detractor_pct, 2)
 
+            aspect_averages: dict[str, float | None] = {}
+            for aspect in selected_aspects:
+                aspect_key = str(aspect.get("key", ""))
+                count = aspect_score_counts.get(aspect_key, 0)
+                if count > 0:
+                    aspect_averages[aspect_key] = round(
+                        aspect_score_totals.get(aspect_key, 0.0) / count,
+                        2,
+                    )
+                else:
+                    aspect_averages[aspect_key] = None
+
             summary_rows.append(
                 {
                     "brand_name": brand_name,
@@ -385,6 +568,9 @@ def _run_analysis_pipeline(
                     "review_count": review_count,
                     "avg_google_score": avg_google_score,
                     "nps_score": nps_score,
+                    "stores_covered": len(store_review_counts),
+                    "aspect_averages": aspect_averages,
+                    "aspect_mentions": dict(aspect_score_counts),
                 }
             )
 
@@ -396,9 +582,25 @@ def _run_analysis_job(job_id: str) -> None:
     if not job:
         return
 
+    if bool(job.get("cancel_requested")) or str(job.get("status", "")) == "cancelled":
+        _update_analysis_job(
+            job_id,
+            status="cancelled",
+            finished_at=time.time(),
+            progress="Cancelled.",
+            info="Analysis was cancelled.",
+            error="Analysis cancelled by user.",
+        )
+        return
+
     preview_brands = job.get("preview_brands") or []
     requested_counts = job.get("requested_counts") or {}
-    if not isinstance(preview_brands, list) or not isinstance(requested_counts, dict):
+    selected_aspects = job.get("selected_aspects") or DEFAULT_SELECTED_ASPECTS
+    if (
+        not isinstance(preview_brands, list)
+        or not isinstance(requested_counts, dict)
+        or not isinstance(selected_aspects, list)
+    ):
         _update_analysis_job(
             job_id,
             status="failed",
@@ -416,6 +618,7 @@ def _run_analysis_job(job_id: str) -> None:
     )
 
     try:
+        _check_job_pause_or_cancel(job_id)
         report_id = str(uuid.uuid4())
         summary_csv_path, detailed_csv_path = _report_paths(report_id)
 
@@ -423,10 +626,11 @@ def _run_analysis_job(job_id: str) -> None:
             preview_brands=preview_brands,
             requested_counts=requested_counts,
             detailed_csv_path=detailed_csv_path,
+            selected_aspects=selected_aspects,
             job_id=job_id,
         )
 
-        _write_summary_csv(summary_csv_path, summary_rows)
+        _write_summary_csv(summary_csv_path, summary_rows, selected_aspects)
         _cache_record_by_id(
             REPORT_CACHE,
             report_id,
@@ -436,6 +640,7 @@ def _run_analysis_job(job_id: str) -> None:
                 "detailed_row_count": detailed_row_count,
                 "summary_csv_path": summary_csv_path,
                 "detailed_csv_path": detailed_csv_path,
+                "selected_aspects": selected_aspects,
             },
             lock=REPORT_CACHE_LOCK,
         )
@@ -457,6 +662,15 @@ def _run_analysis_job(job_id: str) -> None:
             analysis_errors=analysis_errors,
             info=info,
             error="",
+        )
+    except AnalysisCancelledError as exc:
+        _update_analysis_job(
+            job_id,
+            status="cancelled",
+            finished_at=time.time(),
+            progress="Cancelled.",
+            info="Analysis was cancelled.",
+            error=str(exc),
         )
     except (SerpApiError, RuntimeError) as exc:
         _update_analysis_job(
@@ -557,6 +771,9 @@ def preview() -> str:
         preview_id=preview_id,
         preview_rows=_build_preview_rows(preview_brands),
         analysis_rows=_build_analysis_rows(preview_brands),
+        selected_aspects=DEFAULT_SELECTED_ASPECTS,
+        selected_aspect_values=DEFAULT_SELECTED_ASPECT_VALUES,
+        custom_aspect_values=[],
         selected_brand_indexes=list(range(len(preview_brands))),
         show_analysis_panel=False,
     )
@@ -593,6 +810,9 @@ def analyze() -> str:
             preview_rows=_build_preview_rows(all_preview_brands),
             analysis_rows=_build_analysis_rows(all_preview_brands),
             selected_brand_indexes=list(range(len(all_preview_brands))),
+            selected_aspects=DEFAULT_SELECTED_ASPECTS,
+            selected_aspect_values=DEFAULT_SELECTED_ASPECT_VALUES,
+            custom_aspect_values=[],
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -600,6 +820,27 @@ def analyze() -> str:
     selected_preview_brands = [all_preview_brands[index] for index in selected_source_indexes]
     brand_inputs = _brand_inputs_from_preview(selected_preview_brands)
     preview_rows = _build_preview_rows(all_preview_brands)
+    selected_aspects, selected_aspect_values, custom_aspect_values, aspect_error = _parse_selected_aspects(
+        request.form
+    )
+    if aspect_error:
+        return _render_index(
+            error=aspect_error,
+            selected_geography=selected_geography,
+            brand_inputs=brand_inputs,
+            preview_id=preview_id,
+            preview_rows=preview_rows,
+            analysis_rows=_build_analysis_rows(
+                selected_preview_brands,
+                source_indexes=selected_source_indexes,
+            ),
+            selected_brand_indexes=selected_source_indexes,
+            selected_aspects=selected_aspects,
+            selected_aspect_values=selected_aspect_values,
+            custom_aspect_values=custom_aspect_values,
+            show_analysis_panel=True,
+            auto_scroll_target="analysis-section",
+        )
 
     requested_counts_by_source: dict[int, int] = {}
     for source_index in selected_source_indexes:
@@ -622,6 +863,9 @@ def analyze() -> str:
             preview_rows=preview_rows,
             analysis_rows=analysis_rows,
             selected_brand_indexes=selected_source_indexes,
+            selected_aspects=selected_aspects,
+            selected_aspect_values=selected_aspect_values,
+            custom_aspect_values=custom_aspect_values,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -638,6 +882,9 @@ def analyze() -> str:
             preview_rows=preview_rows,
             analysis_rows=analysis_rows,
             selected_brand_indexes=selected_source_indexes,
+            selected_aspects=selected_aspects,
+            selected_aspect_values=selected_aspect_values,
+            custom_aspect_values=custom_aspect_values,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -654,6 +901,9 @@ def analyze() -> str:
             preview_rows=preview_rows,
             analysis_rows=analysis_rows,
             selected_brand_indexes=selected_source_indexes,
+            selected_aspects=selected_aspects,
+            selected_aspect_values=selected_aspect_values,
+            custom_aspect_values=custom_aspect_values,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
         )
@@ -667,6 +917,8 @@ def analyze() -> str:
         "status": "queued",
         "progress": "Queued for processing.",
         "error": "",
+        "pause_requested": False,
+        "cancel_requested": False,
         "created_at": time.time(),
         "started_at": None,
         "finished_at": None,
@@ -675,6 +927,9 @@ def analyze() -> str:
         "brand_inputs": brand_inputs,
         "preview_rows": preview_rows,
         "selected_brand_indexes": selected_source_indexes,
+        "selected_aspect_values": selected_aspect_values,
+        "custom_aspect_values": custom_aspect_values,
+        "selected_aspects": selected_aspects,
         "analysis_rows": analysis_rows,
         "preview_brands": selected_preview_brands,
         "requested_counts": analysis_requested_counts,
@@ -707,6 +962,9 @@ def analyze() -> str:
             preview_rows=preview_rows,
             analysis_rows=analysis_rows,
             selected_brand_indexes=selected_source_indexes,
+            selected_aspects=selected_aspects,
+            selected_aspect_values=selected_aspect_values,
+            custom_aspect_values=custom_aspect_values,
             show_analysis_panel=True,
             auto_scroll_target="analysis-section",
             analysis_job_id=job_id,
@@ -722,6 +980,9 @@ def analyze() -> str:
         preview_rows=preview_rows,
         analysis_rows=analysis_rows,
         selected_brand_indexes=selected_source_indexes,
+        selected_aspects=selected_aspects,
+        selected_aspect_values=selected_aspect_values,
+        custom_aspect_values=custom_aspect_values,
         show_analysis_panel=True,
         auto_scroll_target="analysis-section",
         analysis_job_id=job_id,
@@ -743,9 +1004,69 @@ def analysis_status(job_id: str) -> Response:
         "progress": str(job.get("progress", "")),
         "error": str(job.get("error", "")),
     }
-    if status in {"completed", "failed"}:
+    if status in TERMINAL_ANALYSIS_STATUSES:
         payload["result_url"] = f"/analysis-result/{job_id}"
     return jsonify(payload)
+
+
+@app.route("/analysis-control/<job_id>", methods=["POST"])
+def analysis_control(job_id: str) -> Response:
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or request.form.get("action", "")).strip().lower()
+    if action not in {"pause", "resume", "cancel"}:
+        return jsonify({"status": "invalid", "error": "Invalid analysis control action."}), 400
+
+    with ANALYSIS_JOB_LOCK:
+        job = ANALYSIS_JOB_CACHE.get(job_id)
+        if not job:
+            return jsonify({"status": "missing", "error": "Analysis job not found."}), 404
+
+        status = str(job.get("status", "missing"))
+        if status in TERMINAL_ANALYSIS_STATUSES:
+            response_payload = {
+                "job_id": job_id,
+                "status": status,
+                "progress": str(job.get("progress", "")),
+                "error": str(job.get("error", "")),
+                "result_url": f"/analysis-result/{job_id}",
+            }
+            return jsonify(response_payload)
+
+        if action == "pause":
+            job["pause_requested"] = True
+            job["status"] = "paused"
+            job["progress"] = PAUSED_ANALYSIS_PROGRESS
+        elif action == "resume":
+            job["pause_requested"] = False
+            if status == "paused":
+                if job.get("started_at"):
+                    job["status"] = "running"
+                    job["progress"] = "Resuming analysis..."
+                else:
+                    job["status"] = "queued"
+                    job["progress"] = "Queued for processing."
+        else:  # action == "cancel"
+            job["cancel_requested"] = True
+            job["pause_requested"] = False
+            if status in {"queued", "paused"}:
+                job["status"] = "cancelled"
+                job["finished_at"] = time.time()
+                job["progress"] = "Cancelled."
+                job["info"] = "Analysis was cancelled."
+                job["error"] = "Analysis cancelled by user."
+            else:
+                job["progress"] = CANCELLING_ANALYSIS_PROGRESS
+
+        updated_status = str(job.get("status", "missing"))
+        response_payload = {
+            "job_id": job_id,
+            "status": updated_status,
+            "progress": str(job.get("progress", "")),
+            "error": str(job.get("error", "")),
+        }
+        if updated_status in TERMINAL_ANALYSIS_STATUSES:
+            response_payload["result_url"] = f"/analysis-result/{job_id}"
+        return jsonify(response_payload)
 
 
 @app.route("/analysis-result/<job_id>", methods=["GET"])
@@ -774,6 +1095,12 @@ def analysis_result(job_id: str) -> str:
         "preview_rows": preview_rows,
         "analysis_rows": analysis_rows,
         "selected_brand_indexes": job.get("selected_brand_indexes", []),
+        "selected_aspect_values": job.get(
+            "selected_aspect_values",
+            DEFAULT_SELECTED_ASPECT_VALUES,
+        ),
+        "custom_aspect_values": job.get("custom_aspect_values", []),
+        "selected_aspects": job.get("selected_aspects", DEFAULT_SELECTED_ASPECTS),
         "show_analysis_panel": True,
         "auto_scroll_target": "analysis-section",
         "analysis_job_id": job_id,
@@ -782,9 +1109,20 @@ def analysis_result(job_id: str) -> str:
         "analysis_job_error": str(job.get("error", "")),
     }
 
-    if status in {"queued", "running"}:
+    if status in ACTIVE_ANALYSIS_STATUSES:
+        info_message = (
+            "Analysis is paused. Resume when you are ready."
+            if status == "paused"
+            else "Analysis is still running in the background."
+        )
         return _render_index(
-            info="Analysis is still running in the background.",
+            info=info_message,
+            **base_context,
+        )
+
+    if status == "cancelled":
+        return _render_index(
+            info=str(job.get("info") or "Analysis was cancelled."),
             **base_context,
         )
 
@@ -823,33 +1161,40 @@ def download_report(report_id: str) -> Response:
         )
 
     # Fallback for in-memory legacy reports.
+    selected_aspects = report.get("selected_aspects", [])
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "brand_name",
-            "store_name",
-            "store_id",
-            "review",
-            "date_of_review",
-            "sentiment_score_1_to_10",
-            "google_rating",
-            "nps_bucket",
-        ]
-    )
+    headers = [
+        "brand_name",
+        "store_name",
+        "store_id",
+        "review",
+        "date_of_review",
+        "sentiment_score_1_to_10",
+        "google_rating",
+        "nps_bucket",
+    ]
+    for aspect in selected_aspects if isinstance(selected_aspects, list) else []:
+        headers.append(f"{str(aspect.get('label', 'Aspect')).strip() or 'Aspect'} sentiment (1-10)")
+    writer.writerow(headers)
+
     for row in report.get("detailed_rows", []):
-        writer.writerow(
-            [
-                row.get("brand_name", ""),
-                row.get("store_name", ""),
-                row.get("store_id", ""),
-                row.get("review_text", ""),
-                row.get("review_date", ""),
-                row.get("sentiment_score", ""),
-                row.get("google_rating", ""),
-                row.get("nps_bucket", ""),
-            ]
-        )
+        values = [
+            row.get("brand_name", ""),
+            row.get("store_name", ""),
+            row.get("store_id", ""),
+            row.get("review_text", ""),
+            row.get("review_date", ""),
+            row.get("sentiment_score", ""),
+            row.get("google_rating", ""),
+            row.get("nps_bucket", ""),
+        ]
+        aspect_scores = row.get("aspect_scores", {})
+        for aspect in selected_aspects if isinstance(selected_aspects, list) else []:
+            aspect_key = str(aspect.get("key", ""))
+            score = aspect_scores.get(aspect_key) if isinstance(aspect_scores, dict) else None
+            values.append(score if score is not None else "N/A")
+        writer.writerow(values)
     return Response(
         buffer.getvalue(),
         mimetype="text/csv",
@@ -875,27 +1220,39 @@ def download_summary(report_id: str) -> Response:
         )
 
     # Fallback for in-memory legacy reports.
+    selected_aspects = report.get("selected_aspects", [])
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "brand_name",
-            "brand_description",
-            "number_of_reviews",
-            "average_google_score",
-            "calculated_nps",
-        ]
-    )
+    headers = [
+        "brand_name",
+        "brand_description",
+        "number_of_reviews",
+        "average_google_score",
+        "calculated_nps",
+    ]
+    for aspect in selected_aspects if isinstance(selected_aspects, list) else []:
+        aspect_label = str(aspect.get("label", "")).strip() or "Aspect"
+        headers.append(f"{aspect_label} sentiment (1-10)")
+        headers.append(f"{aspect_label} mentions")
+    writer.writerow(headers)
+
     for row in report.get("summary_rows", []):
-        writer.writerow(
-            [
-                row.get("brand_name", ""),
-                row.get("brand_description", ""),
-                row.get("review_count", 0),
-                row.get("avg_google_score", ""),
-                row.get("nps_score", 0.0),
-            ]
-        )
+        values = [
+            row.get("brand_name", ""),
+            row.get("brand_description", ""),
+            row.get("review_count", 0),
+            row.get("avg_google_score", ""),
+            row.get("nps_score", 0.0),
+        ]
+        aspect_averages = row.get("aspect_averages", {})
+        aspect_mentions = row.get("aspect_mentions", {})
+        for aspect in selected_aspects if isinstance(selected_aspects, list) else []:
+            aspect_key = str(aspect.get("key", ""))
+            avg_score = aspect_averages.get(aspect_key) if isinstance(aspect_averages, dict) else None
+            mention_count = aspect_mentions.get(aspect_key) if isinstance(aspect_mentions, dict) else None
+            values.append(avg_score if avg_score is not None else "N/A")
+            values.append(mention_count if isinstance(mention_count, int) else 0)
+        writer.writerow(values)
     return Response(
         buffer.getvalue(),
         mimetype="text/csv",

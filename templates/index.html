@@ -9,9 +9,11 @@
   <body>
     <header class="site-header">
       <div class="header-inner">
-        <div class="header-spacer"></div>
-        <a class="header-title" href="{{ url_for('home') }}">Sentiment Analyser</a>
-        <div class="header-spacer"></div>
+        <div class="header-logo" aria-label="Strategy Prism">
+          <span class="header-logo-mark" aria-hidden="true"></span>
+          <span class="header-logo-text">Strategy Prism</span>
+        </div>
+        <div class="header-title">Sentiment Analyser</div>
       </div>
     </header>
 
@@ -24,15 +26,6 @@
         </p>
 
         <form method="post" action="{{ url_for('preview') }}" class="search-form" id="preview-form">
-          <label for="geography">Geography</label>
-          <select id="geography" name="geography">
-            {% for option in geography_choices %}
-            <option value="{{ option.value }}" {% if option.value == selected_geography %}selected{% endif %}>
-              {{ option.label }}
-            </option>
-            {% endfor %}
-          </select>
-
           <div class="brand-grid-header">
             <span>Brand Name</span>
             <span></span>
@@ -52,6 +45,15 @@
             </div>
             {% endfor %}
           </div>
+
+          <label for="geography" class="form-label">Geography</label>
+          <select id="geography" name="geography">
+            {% for option in geography_choices %}
+            <option value="{{ option.value }}" {% if option.value == selected_geography %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+            {% endfor %}
+          </select>
 
           <div class="actions-row">
             <button type="button" id="add-brand-btn" class="ghost-btn">Add Brand</button>
@@ -81,7 +83,7 @@
                 <th>Store Name Examples</th>
                 <th>Google Business Description</th>
                 <th>Geography</th>
-                <th>Check</th>
+                <th>Include</th>
               </tr>
             </thead>
             <tbody>
@@ -103,9 +105,9 @@
                       type="checkbox"
                       class="brand-select-checkbox"
                       data-brand-index="{{ loop.index0 }}"
+                      aria-label="Include {{ row.brand_name }}"
                       {% if not selected_index_set or loop.index0 in selected_index_set %}checked{% endif %}
                     />
-                    <span>Check</span>
                   </label>
                 </td>
               </tr>
@@ -135,7 +137,7 @@
 
               <div id="analysis-parameter-list" class="vertical-parameter-list">
                 {% for row in analysis_rows %}
-                <div class="vertical-parameter-item" data-brand-index="{{ row.index }}">
+                <div class="vertical-parameter-item brand-parameter-item" data-brand-index="{{ row.index }}">
                   <table class="vertical-parameter-table">
                     <tbody>
                       <tr>
@@ -146,6 +148,52 @@
                         <th>Brand Description</th>
                         <td>{{ row.brand_description }}</td>
                       </tr>
+                      {% if loop.first %}
+                      <tr>
+                        <th>Brand aspects of interest</th>
+                        <td>
+                          <details class="aspect-dropdown" id="aspect-dropdown">
+                            <summary id="aspect-dropdown-summary">Select aspects</summary>
+                            <div class="aspect-dropdown-menu">
+                              {% for choice in aspect_choices %}
+                              <label class="aspect-choice">
+                                <input
+                                  type="checkbox"
+                                  name="aspects[]"
+                                  value="{{ choice.value }}"
+                                  {% if choice.value in selected_aspect_values %}checked{% endif %}
+                                />
+                                <span>{{ choice.label }}</span>
+                              </label>
+                              {% endfor %}
+
+                              <div id="custom-aspects-list" class="custom-aspects-list">
+                                {% for custom_aspect in custom_aspect_values %}
+                                <span class="custom-aspect-chip" data-custom-aspect="{{ custom_aspect }}">
+                                  <span>{{ custom_aspect }}</span>
+                                  <button
+                                    type="button"
+                                    class="custom-aspect-remove"
+                                    aria-label="Remove {{ custom_aspect }}"
+                                  >
+                                    x
+                                  </button>
+                                  <input type="hidden" name="custom_aspects[]" value="{{ custom_aspect }}" />
+                                </span>
+                                {% endfor %}
+                              </div>
+                              <div class="custom-aspect-input-row">
+                                <input
+                                  type="text"
+                                  id="custom-aspect-input"
+                                  placeholder="Add additional custom aspects"
+                                />
+                              </div>
+                            </div>
+                          </details>
+                        </td>
+                      </tr>
+                      {% endif %}
                       <tr>
                         <th>Estimated Google Reviews</th>
                         <td>{{ row.estimated_review_count if row.estimated_review_count is not none else "Unknown" }}</td>
@@ -213,6 +261,10 @@
                     <th>Number of Reviews</th>
                     <th>Average Google Score</th>
                     <th>Calculated NPS</th>
+                    {% for aspect in selected_aspects %}
+                    <th>{{ aspect.label }} (Avg)</th>
+                    <th>{{ aspect.label }} Mentions</th>
+                    {% endfor %}
                   </tr>
                 </thead>
                 <tbody>
@@ -223,6 +275,12 @@
                     <td>{{ row.review_count }}</td>
                     <td>{{ row.avg_google_score if row.avg_google_score is not none else "N/A" }}</td>
                     <td>{{ row.nps_score }}</td>
+                    {% for aspect in selected_aspects %}
+                    {% set aspect_avg = row.aspect_averages.get(aspect.key) if row.aspect_averages else none %}
+                    {% set aspect_mentions = row.aspect_mentions.get(aspect.key) if row.aspect_mentions else 0 %}
+                    <td>{{ aspect_avg if aspect_avg is not none else "N/A" }}</td>
+                    <td>{{ aspect_mentions }}</td>
+                    {% endfor %}
                   </tr>
                   {% endfor %}
                 </tbody>
@@ -244,6 +302,9 @@
                     <th>Review</th>
                     <th>Date of Review</th>
                     <th>Sentiment Score</th>
+                    {% for aspect in selected_aspects %}
+                    <th>{{ aspect.label }}</th>
+                    {% endfor %}
                   </tr>
                 </thead>
                 <tbody>
@@ -254,21 +315,33 @@
                     <td>{{ row.review_text }}</td>
                     <td>{{ row.review_date }}</td>
                     <td>{{ row.sentiment_score }}</td>
+                    {% for aspect in selected_aspects %}
+                    {% set aspect_score = row.aspect_scores.get(aspect.key) if row.aspect_scores else none %}
+                    <td>{{ aspect_score if aspect_score is not none else "N/A" }}</td>
+                    {% endfor %}
                   </tr>
                   {% endfor %}
                 </tbody>
               </table>
             </div>
             {% else %}
-            <div class="empty-preview">your data will appear here</div>
+            <div class="empty-preview">Your data will appear here</div>
             {% endif %}
 
-            {% if analysis_job_id and analysis_job_status in ["queued", "running"] %}
+            {% if analysis_job_id and analysis_job_status in ["queued", "running", "paused"] %}
             <div class="analysis-loading-status" id="analysis-job-status">
               <span class="inline-spinner" aria-hidden="true"></span>
               <span class="analysis-loading-text">
                 {{ analysis_job_progress or "Queued for processing." }}
               </span>
+            </div>
+            <div class="analysis-job-controls">
+              <button type="button" class="ghost-btn job-control-btn" id="pause-analysis-btn">
+                {{ "Resume" if analysis_job_status == "paused" else "Pause" }}
+              </button>
+              <button type="button" class="ghost-btn job-control-btn cancel-analysis-btn" id="cancel-analysis-btn">
+                Cancel
+              </button>
             </div>
             {% endif %}
           </div>
@@ -295,17 +368,26 @@
         const analysisForm = document.querySelector(".analysis-form");
         const backBtn = document.getElementById("back-to-confirm");
         const confirmSection = document.getElementById("confirm-section");
+        const aspectDropdownSummary = document.getElementById("aspect-dropdown-summary");
+        const customAspectsList = document.getElementById("custom-aspects-list");
+        const customAspectInput = document.getElementById("custom-aspect-input");
+        const aspectCheckboxes = analysisForm
+          ? Array.from(analysisForm.querySelectorAll('input[name="aspects[]"]'))
+          : [];
         const selectedBrandFields = document.getElementById("selected-brand-fields");
-        const parameterItems = Array.from(document.querySelectorAll(".vertical-parameter-item"));
+        const parameterItems = Array.from(document.querySelectorAll(".brand-parameter-item"));
         const brandSelectBoxes = Array.from(document.querySelectorAll(".brand-select-checkbox"));
         const loadingOverlay = document.getElementById("loading-overlay");
         const loadingText = document.getElementById("loading-text");
         const analysisJobId = {{ analysis_job_id|tojson }};
         const analysisJobStatus = {{ analysis_job_status|tojson }};
+        let currentAnalysisJobStatus = analysisJobStatus;
         const analysisJobStatusBox = document.getElementById("analysis-job-status");
         const analysisJobStatusText = analysisJobStatusBox
           ? analysisJobStatusBox.querySelector(".analysis-loading-text")
           : null;
+        const pauseAnalysisBtn = document.getElementById("pause-analysis-btn");
+        const cancelAnalysisBtn = document.getElementById("cancel-analysis-btn");
         const autoScrollTarget = {{ auto_scroll_target|tojson }};
 
         function showLoading(text) {
@@ -321,9 +403,59 @@
           loadingOverlay.setAttribute("aria-hidden", "true");
         }
 
+        function isActiveAnalysisStatus(status) {
+          return ["queued", "running", "paused"].includes(String(status || ""));
+        }
+
+        function isTerminalAnalysisStatus(status) {
+          return ["completed", "failed", "cancelled"].includes(String(status || ""));
+        }
+
+        function updateAnalysisControlButtons(status) {
+          const normalizedStatus = String(status || "");
+          const controlsEnabled = isActiveAnalysisStatus(normalizedStatus);
+          if (pauseAnalysisBtn) {
+            pauseAnalysisBtn.textContent = normalizedStatus === "paused" ? "Resume" : "Pause";
+            pauseAnalysisBtn.disabled = !controlsEnabled;
+          }
+          if (cancelAnalysisBtn) {
+            cancelAnalysisBtn.disabled = !controlsEnabled;
+          }
+        }
+
+        async function sendAnalysisControl(action) {
+          if (!analysisJobId) return;
+          try {
+            const response = await fetch(`/analysis-control/${encodeURIComponent(analysisJobId)}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              const message = payload && payload.error ? payload.error : "Unable to update analysis job.";
+              throw new Error(message);
+            }
+
+            currentAnalysisJobStatus = payload.status || currentAnalysisJobStatus;
+            if (analysisJobStatusText && payload.progress) {
+              analysisJobStatusText.textContent = payload.progress;
+            }
+            updateAnalysisControlButtons(currentAnalysisJobStatus);
+
+            if (isTerminalAnalysisStatus(currentAnalysisJobStatus)) {
+              const resultUrl = payload.result_url || `/analysis-result/${encodeURIComponent(analysisJobId)}`;
+              window.location.href = resultUrl;
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Unable to update analysis job.";
+            window.alert(message);
+          }
+        }
+
         function startAnalysisPolling() {
           if (!analysisJobId) return;
-          if (analysisJobStatus !== "queued" && analysisJobStatus !== "running") return;
+          if (!isActiveAnalysisStatus(currentAnalysisJobStatus)) return;
 
           const statusUrl = `/analysis-status/${encodeURIComponent(analysisJobId)}`;
           let isPolling = false;
@@ -337,11 +469,13 @@
               if (!response.ok) throw new Error("status check failed");
               const payload = await response.json();
 
+              currentAnalysisJobStatus = payload.status || currentAnalysisJobStatus;
               if (analysisJobStatusText && payload.progress) {
                 analysisJobStatusText.textContent = payload.progress;
               }
+              updateAnalysisControlButtons(currentAnalysisJobStatus);
 
-              if (payload.status === "completed" || payload.status === "failed") {
+              if (isTerminalAnalysisStatus(currentAnalysisJobStatus)) {
                 const resultUrl = payload.result_url || `/analysis-result/${encodeURIComponent(analysisJobId)}`;
                 window.location.href = resultUrl;
                 return;
@@ -448,6 +582,75 @@
           return true;
         }
 
+        function normalizeCustomAspectValue(rawValue) {
+          return String(rawValue || "").replace(/\s+/g, " ").trim();
+        }
+
+        function addCustomAspectChip(rawValue) {
+          if (!customAspectsList) return false;
+          const value = normalizeCustomAspectValue(rawValue);
+          if (!value) return false;
+
+          const loweredValue = value.toLowerCase();
+          const existing = Array.from(customAspectsList.querySelectorAll(".custom-aspect-chip"));
+          const alreadyExists = existing.some((chip) => {
+            return (chip.dataset.customAspect || "").toLowerCase() === loweredValue;
+          });
+          if (alreadyExists) return false;
+
+          const chip = document.createElement("span");
+          chip.className = "custom-aspect-chip";
+          chip.dataset.customAspect = value;
+
+          const label = document.createElement("span");
+          label.textContent = value;
+
+          const removeButton = document.createElement("button");
+          removeButton.type = "button";
+          removeButton.className = "custom-aspect-remove";
+          removeButton.setAttribute("aria-label", `Remove ${value}`);
+          removeButton.textContent = "x";
+
+          const hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = "custom_aspects[]";
+          hidden.value = value;
+
+          chip.appendChild(label);
+          chip.appendChild(removeButton);
+          chip.appendChild(hidden);
+          customAspectsList.appendChild(chip);
+          return true;
+        }
+
+        function updateAspectSummary() {
+          if (!aspectDropdownSummary) return;
+          const selectedLabels = aspectCheckboxes
+            .filter((box) => box.checked)
+            .map((box) => {
+              const label = box.closest("label");
+              return label ? label.textContent.trim() : "";
+            })
+            .filter((value) => value);
+
+          const customLabels = customAspectsList
+            ? Array.from(customAspectsList.querySelectorAll(".custom-aspect-chip"))
+                .map((chip) => chip.dataset.customAspect || "")
+                .filter((value) => value)
+            : [];
+          const allLabels = selectedLabels.concat(customLabels);
+
+          if (!allLabels.length) {
+            aspectDropdownSummary.textContent = "Select aspects";
+            return;
+          }
+          if (allLabels.length <= 2) {
+            aspectDropdownSummary.textContent = allLabels.join(", ");
+            return;
+          }
+          aspectDropdownSummary.textContent = `${allLabels.length} aspects selected`;
+        }
+
         if (addBrandBtn) addBrandBtn.addEventListener("click", addRow);
 
         if (brandRows) {
@@ -470,6 +673,29 @@
             syncSelectedBrands(false);
           });
         });
+
+        aspectCheckboxes.forEach((box) => {
+          box.addEventListener("change", () => {
+            updateAspectSummary();
+          });
+        });
+
+        if (pauseAnalysisBtn) {
+          pauseAnalysisBtn.addEventListener("click", () => {
+            const action = currentAnalysisJobStatus === "paused" ? "resume" : "pause";
+            sendAnalysisControl(action);
+          });
+        }
+
+        if (cancelAnalysisBtn) {
+          cancelAnalysisBtn.addEventListener("click", () => {
+            const confirmed = window.confirm(
+              "Are you sure you want to cancel this analysis? This cannot be undone."
+            );
+            if (!confirmed) return;
+            sendAnalysisControl("cancel");
+          });
+        }
 
         if (previewForm) {
           previewForm.addEventListener("submit", () => {
@@ -498,6 +724,29 @@
           });
         }
 
+        if (customAspectInput) {
+          customAspectInput.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const added = addCustomAspectChip(customAspectInput.value);
+            if (added) {
+              customAspectInput.value = "";
+            }
+            updateAspectSummary();
+          });
+        }
+
+        if (customAspectsList) {
+          customAspectsList.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            if (!target.classList.contains("custom-aspect-remove")) return;
+            const chip = target.closest(".custom-aspect-chip");
+            if (chip) chip.remove();
+            updateAspectSummary();
+          });
+        }
+
         if (backBtn) {
           backBtn.addEventListener("click", () => {
             showPreviewStep();
@@ -515,8 +764,11 @@
         }
 
         syncSelectedBrands(false);
+        updateAspectSummary();
+        updateAnalysisControlButtons(currentAnalysisJobStatus);
         startAnalysisPolling();
       })();
     </script>
   </body>
 </html>
+

@@ -56,6 +56,7 @@ Then open `http://127.0.0.1:5000`.
 - Large pull limits are configurable via env vars:
   - `MAX_REVIEWS_PER_BRAND` (default `1000`)
   - `MAX_TOTAL_REVIEWS_PER_ANALYSIS` (default `1000`)
+  - `MAX_ANALYSIS_CANDIDATES_PER_BRAND` (default `3`)
   - `ANALYSIS_TIME_BUDGET_SECONDS` (default `1800`)
   - `ANALYSIS_SENTIMENT_BATCH_SIZE` (default `12`)
   - `SENTIMENT_BATCH_SIZE` (default `12`)

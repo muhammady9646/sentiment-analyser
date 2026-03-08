@@ -1,8 +1,158 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from typing import Any
+
+ASPECT_CHOICES: tuple[dict[str, str], ...] = (
+    {"value": "cost", "label": "Cost"},
+    {"value": "customer_service", "label": "Customer service"},
+    {"value": "location", "label": "Location"},
+)
+DEFAULT_SELECTED_ASPECT_VALUES: tuple[str, ...] = ("cost", "customer_service", "location")
+ASPECT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "cost": (
+        "cost",
+        "price",
+        "pricing",
+        "expensive",
+        "cheap",
+        "affordable",
+        "overpriced",
+        "value",
+        "fees",
+        "costly",
+    ),
+    "customer_service": (
+        "service",
+        "staff",
+        "customer service",
+        "support",
+        "manager",
+        "employee",
+        "friendly",
+        "helpful",
+        "attentive",
+        "rude",
+    ),
+    "location": (
+        "location",
+        "area",
+        "parking",
+        "distance",
+        "nearby",
+        "access",
+        "accessible",
+        "branch",
+        "store",
+        "neighborhood",
+    ),
+}
+
+
+def aspect_choices() -> list[dict[str, str]]:
+    return [dict(choice) for choice in ASPECT_CHOICES]
+
+
+def default_aspect_values() -> list[str]:
+    return list(DEFAULT_SELECTED_ASPECT_VALUES)
+
+
+def normalize_custom_aspect(raw_value: str | None) -> str:
+    return str(raw_value or "").strip()
+
+
+def normalize_custom_aspect_values(raw_values: list[str] | str | None) -> list[str]:
+    if raw_values is None:
+        return []
+
+    source_values: list[str]
+    if isinstance(raw_values, str):
+        source_values = [raw_values]
+    else:
+        source_values = [str(value) for value in raw_values]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in source_values:
+        cleaned = normalize_custom_aspect(value)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _slugify_aspect(raw_value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", raw_value.lower()).strip("_")
+    return slug[:24] or "custom"
+
+
+def build_selected_aspects(
+    raw_values: list[str] | None,
+    custom_aspect_values: list[str] | str | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    selected_values = {
+        str(value).strip().lower()
+        for value in (raw_values or [])
+        if str(value).strip()
+    }
+
+    aspects: list[dict[str, Any]] = []
+    for value in DEFAULT_SELECTED_ASPECT_VALUES:
+        if value not in selected_values:
+            continue
+        aspects.append(
+            {
+                "value": value,
+                "key": value,
+                "label": next(
+                    choice["label"]
+                    for choice in ASPECT_CHOICES
+                    if choice["value"] == value
+                ),
+                "keywords": list(ASPECT_KEYWORDS.get(value, (value,))),
+            }
+        )
+
+    custom_values = normalize_custom_aspect_values(custom_aspect_values)
+    used_keys: set[str] = {str(aspect.get("key", "")) for aspect in aspects}
+    for custom_text in custom_values:
+        lower_custom = custom_text.lower()
+        token_keywords = [
+            token
+            for token in re.split(r"[^a-z0-9]+", lower_custom)
+            if len(token) > 1
+        ]
+        ordered_keywords: list[str] = []
+        for keyword in [lower_custom, *token_keywords]:
+            if keyword and keyword not in ordered_keywords:
+                ordered_keywords.append(keyword)
+
+        base_key = f"custom_{_slugify_aspect(lower_custom)}"
+        key = base_key
+        suffix = 2
+        while key in used_keys:
+            key = f"{base_key}_{suffix}"
+            suffix += 1
+        used_keys.add(key)
+
+        aspects.append(
+            {
+                "value": "custom",
+                "key": key,
+                "label": custom_text,
+                "keywords": ordered_keywords,
+            }
+        )
+
+    if not aspects:
+        return [], "Select at least one aspect before running analysis."
+    return aspects, None
 
 
 def map_label_confidence_to_ten(label: str, confidence: float) -> float:
@@ -187,3 +337,99 @@ class SentimentScorer:
 
     def score_to_ten(self, text: str) -> float:
         return self.score_many_to_ten([text])[0]
+
+
+class AspectSentimentScorer:
+    SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+    def __init__(self, base_scorer: SentimentScorer | None = None) -> None:
+        self._base_scorer = base_scorer or SentimentScorer()
+
+    @staticmethod
+    def _keyword_in_text(lowered_text: str, keyword: str) -> bool:
+        normalized = keyword.strip().lower()
+        if not normalized:
+            return False
+        if " " in normalized:
+            return normalized in lowered_text
+        return re.search(rf"\b{re.escape(normalized)}\b", lowered_text) is not None
+
+    @classmethod
+    def _extract_aspect_snippet(
+        cls,
+        text: str,
+        aspect_keywords: list[str],
+    ) -> str:
+        cleaned = str(text).strip()
+        if not cleaned:
+            return ""
+
+        sentences = [
+            sentence.strip()
+            for sentence in cls.SENTENCE_SPLIT_RE.split(cleaned)
+            if sentence.strip()
+        ]
+        if not sentences:
+            sentences = [cleaned]
+
+        matching_sentences: list[str] = []
+        for sentence in sentences:
+            lowered_sentence = sentence.lower()
+            if any(cls._keyword_in_text(lowered_sentence, keyword) for keyword in aspect_keywords):
+                matching_sentences.append(sentence)
+
+        if matching_sentences:
+            return " ".join(matching_sentences[:2]).strip()
+
+        lowered_review = cleaned.lower()
+        if any(cls._keyword_in_text(lowered_review, keyword) for keyword in aspect_keywords):
+            return cleaned
+        return ""
+
+    def score_aspects_for_many(
+        self,
+        texts: list[str],
+        selected_aspects: list[dict[str, Any]],
+        batch_size: int | None = None,
+    ) -> list[dict[str, float | None]]:
+        if not texts:
+            return []
+
+        results = [
+            {
+                str(aspect.get("key", "")): None
+                for aspect in selected_aspects
+            }
+            for _ in texts
+        ]
+
+        model_inputs: list[str] = []
+        score_index_map: list[tuple[int, str]] = []
+        for review_index, text in enumerate(texts):
+            for aspect in selected_aspects:
+                aspect_key = str(aspect.get("key", "")).strip()
+                keywords = [
+                    str(keyword).strip().lower()
+                    for keyword in aspect.get("keywords", [])
+                    if str(keyword).strip()
+                ]
+                if not aspect_key or not keywords:
+                    continue
+
+                snippet = self._extract_aspect_snippet(text, keywords)
+                if not snippet:
+                    continue
+                model_inputs.append(snippet)
+                score_index_map.append((review_index, aspect_key))
+
+        if not model_inputs:
+            return results
+
+        scores = self._base_scorer.score_many_to_ten(
+            model_inputs,
+            batch_size=batch_size,
+        )
+        for (review_index, aspect_key), score in zip(score_index_map, scores):
+            results[review_index][aspect_key] = score
+
+        return results

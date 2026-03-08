@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -200,6 +201,7 @@ class SerpApiReviewClient:
         self,
         candidates: list[dict[str, Any]],
         max_reviews: int = 20,
+        shuffle_candidates: bool = True,
     ) -> Iterator[dict[str, Any]]:
         if not candidates:
             raise SerpApiError("No store candidates found to analyze.")
@@ -207,33 +209,72 @@ class SerpApiReviewClient:
         total_target = max(1, max_reviews)
         yielded = 0
         errors: list[str] = []
+        ordered_candidates = list(candidates)
+        if shuffle_candidates and len(ordered_candidates) > 1:
+            random.shuffle(ordered_candidates)
 
-        for candidate in candidates:
-            if yielded >= total_target:
-                break
-
+        active_streams: list[dict[str, Any]] = []
+        for candidate in ordered_candidates:
             id_key = candidate.get("id_key")
             id_value = candidate.get("id_value")
             if not isinstance(id_key, str) or not isinstance(id_value, str):
                 errors.append("Place candidate is missing a valid identifier.")
                 continue
 
-            store_name = str(candidate.get("name") or "Unknown")
-            try:
-                for review in self._iter_reviews_paginated(
-                    id_key=id_key,
-                    place_id_or_data_id=id_value,
-                    max_reviews=total_target - yielded,
-                ):
-                    row = dict(review.__dict__)
-                    row["store_name"] = store_name
-                    row["store_id"] = str(candidate.get("id_value") or "")
-                    yield row
-                    yielded += 1
-                    if yielded >= total_target:
-                        break
-            except SerpApiError as exc:
-                errors.append(str(exc))
+            active_streams.append(
+                {
+                    "store_name": str(candidate.get("name") or "Unknown"),
+                    "store_id": str(candidate.get("id_value") or ""),
+                    "iterator": self._iter_reviews_paginated(
+                        id_key=id_key,
+                        place_id_or_data_id=id_value,
+                        max_reviews=total_target,
+                    ),
+                }
+            )
+
+        seen_signatures: set[tuple[str, str, str, str]] = set()
+        while yielded < total_target and active_streams:
+            next_streams: list[dict[str, Any]] = []
+            cycle_progress = False
+
+            for stream in active_streams:
+                iterator = stream["iterator"]
+                try:
+                    review = next(iterator)
+                except StopIteration:
+                    continue
+                except SerpApiError as exc:
+                    errors.append(str(exc))
+                    continue
+
+                signature = (
+                    str(review.author_name),
+                    str(review.text),
+                    str(review.review_time),
+                    str(stream["store_id"]),
+                )
+                if signature in seen_signatures:
+                    next_streams.append(stream)
+                    continue
+
+                seen_signatures.add(signature)
+                row = dict(review.__dict__)
+                row["store_name"] = stream["store_name"]
+                row["store_id"] = stream["store_id"]
+                yield row
+                yielded += 1
+                cycle_progress = True
+
+                if yielded >= total_target:
+                    break
+                next_streams.append(stream)
+
+            if yielded >= total_target:
+                break
+            if not cycle_progress and not next_streams:
+                break
+            active_streams = next_streams
 
         if yielded == 0:
             if errors:

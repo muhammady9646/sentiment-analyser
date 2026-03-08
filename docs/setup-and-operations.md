@@ -66,6 +66,7 @@ Render flow:
    - `SENTIMENT_DYNAMIC_QUANTIZE=1`
    - `SENTIMENT_MODEL_REVISION=714eb0fa89d2f80546fda750413ed43d93601a13`
    - `TORCH_NUM_THREADS=1`
+   - `MAX_ANALYSIS_CANDIDATES_PER_BRAND=3`
    - `MAX_TOTAL_REVIEWS_PER_ANALYSIS=1000`
 4. Start command:
    - `gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 600 app:app`
